@@ -282,7 +282,9 @@ def build_logs_df(raw: pd.DataFrame) -> pd.DataFrame:
     logs = raw[available_cols].copy()
     logs = logs.rename(columns={k: v for k, v in STAT_COLS_MAP.items() if k in available_cols})
 
-    # Deduplicate on the composite PK to avoid IntegrityError on insert.
+    # Deduplicate on the composite PK as a safety net — the NBA API should
+    # return exactly one row per player-game, but duplicates have been
+    # observed when raw data is merged from multiple partial fetches.
     logs = logs.drop_duplicates(subset=["player_id", "game_id"])
 
     # --- DNP / inactive edge-case handling ---

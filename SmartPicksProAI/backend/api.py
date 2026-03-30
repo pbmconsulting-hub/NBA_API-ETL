@@ -233,8 +233,10 @@ def get_games_today() -> dict:
             if len(teams) >= 2:
                 away_tri = teams.iloc[0].get("teamTricode", "")
                 home_tri = teams.iloc[1].get("teamTricode", "")
-                away_team_id = int(teams.iloc[0].get("teamId", 0)) or None
-                home_team_id = int(teams.iloc[1].get("teamId", 0)) or None
+                raw_away = teams.iloc[0].get("teamId")
+                raw_home = teams.iloc[1].get("teamId")
+                away_team_id = int(raw_away) if raw_away is not None else None
+                home_team_id = int(raw_home) if raw_home is not None else None
                 matchup = f"{home_tri} vs. {away_tri}"
             else:
                 away_tri = ""
