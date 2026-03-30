@@ -45,8 +45,10 @@ cd SmartPicksProAI/backend
 python setup_db.py
 ```
 
-Creates `smartpicks.db` with three tables: **Players**, **Games**, and
-**Player_Game_Logs**.  Safe to run multiple times — uses `IF NOT EXISTS`.
+Creates `smartpicks.db` with eight tables: **Players**, **Teams**, **Games**,
+**Player_Game_Logs**, **Team_Game_Stats**, **Defense_Vs_Position**,
+**Team_Roster**, and **Injury_Status**.  Safe to run multiple times — uses
+`IF NOT EXISTS`.
 
 ### 3. Seed historical data (run once)
 
@@ -55,8 +57,10 @@ cd SmartPicksProAI/backend
 python initial_pull.py
 ```
 
-Fetches every player game log for the **2025-26 NBA regular season** and
-populates all three tables.  This may take a minute due to API rate limits.
+Fetches every player game log for the **2025-26 NBA regular season**, seeds
+the **Teams** table from `nba_api` static data, and populates **Players**,
+**Games**, and **Player_Game_Logs**.  This may take a minute due to API rate
+limits.
 
 ---
 
@@ -166,8 +170,8 @@ between the last stored date and yesterday, then appends new rows.
 
 | File | Purpose |
 |---|---|
-| `backend/setup_db.py` | Creates `smartpicks.db` and the three tables with `IF NOT EXISTS` guards. |
-| `backend/initial_pull.py` | One-time seed script — pulls the full 2025-26 season via `LeagueGameLog`, cleans/renames columns, handles DNP edge cases, and loads all three tables. |
+| `backend/setup_db.py` | Creates `smartpicks.db` and all eight tables with `IF NOT EXISTS` guards and `ALTER TABLE` migration support. |
+| `backend/initial_pull.py` | One-time seed script — seeds Teams from `nba_api` static data, pulls the full 2025-26 season via `LeagueGameLog`, cleans/renames columns, handles DNP edge cases, and loads Players, Games, and Player_Game_Logs. |
 | `backend/data_updater.py` | Exposes `run_update()` — finds the latest date in the DB, fetches only new games, handles DNP/null stats, and appends them. No scheduling loops. |
 | `backend/api.py` | FastAPI app with three endpoints: last-5 stats, today's games, and manual refresh trigger. |
 | `frontend/api_service.py` | HTTP client using `requests` with `@st.cache_data` caching and error handling. |
@@ -182,9 +186,26 @@ between the last stored date and yesterday, then appends new rows.
 | Column | Type | Notes |
 |---|---|---|
 | `player_id` | INTEGER | Primary key |
-| `first_name` | TEXT | |
-| `last_name` | TEXT | |
+| `first_name` | TEXT | Not null |
+| `last_name` | TEXT | Not null |
+| `full_name` | TEXT | |
 | `team_id` | INTEGER | |
+| `team_abbreviation` | TEXT | |
+| `position` | TEXT | |
+| `is_active` | INTEGER | Default 1 |
+
+**Teams**
+
+| Column | Type | Notes |
+|---|---|---|
+| `team_id` | INTEGER | Primary key |
+| `abbreviation` | TEXT | Not null |
+| `team_name` | TEXT | Not null |
+| `conference` | TEXT | |
+| `division` | TEXT | |
+| `pace` | REAL | |
+| `ortg` | REAL | |
+| `drtg` | REAL | |
 
 **Games**
 
@@ -192,19 +213,87 @@ between the last stored date and yesterday, then appends new rows.
 |---|---|---|
 | `game_id` | TEXT | Primary key |
 | `game_date` | TEXT | YYYY-MM-DD |
+| `season` | TEXT | e.g. `"2025-26"` |
+| `home_team_id` | INTEGER | FK → Teams |
+| `away_team_id` | INTEGER | FK → Teams |
+| `home_abbrev` | TEXT | e.g. `"LAL"` |
+| `away_abbrev` | TEXT | e.g. `"BOS"` |
 | `matchup` | TEXT | e.g. `"LAL vs. BOS"` |
 
 **Player_Game_Logs**
 
 | Column | Type | Notes |
 |---|---|---|
-| `log_id` | INTEGER | Primary key, auto-increment |
-| `player_id` | INTEGER | Foreign key → Players |
-| `game_id` | TEXT | Foreign key → Games |
-| `pts` | INTEGER | Points (0 for DNP) |
-| `reb` | INTEGER | Rebounds (0 for DNP) |
-| `ast` | INTEGER | Assists (0 for DNP) |
-| `blk` | INTEGER | Blocks (0 for DNP) |
-| `stl` | INTEGER | Steals (0 for DNP) |
-| `tov` | INTEGER | Turnovers (0 for DNP) |
+| `player_id` | INTEGER | Composite PK, FK → Players |
+| `game_id` | TEXT | Composite PK, FK → Games |
 | `min` | TEXT | Minutes played (`0:00` for DNP) |
+| `pts` | INTEGER | Points (0 for DNP) |
+| `reb` | INTEGER | Rebounds |
+| `ast` | INTEGER | Assists |
+| `stl` | INTEGER | Steals |
+| `blk` | INTEGER | Blocks |
+| `tov` | INTEGER | Turnovers |
+| `fgm` | INTEGER | Field goals made |
+| `fga` | INTEGER | Field goals attempted |
+| `fg_pct` | REAL | Field goal percentage |
+| `fg3m` | INTEGER | Three-pointers made |
+| `fg3a` | INTEGER | Three-pointers attempted |
+| `fg3_pct` | REAL | Three-point percentage |
+| `ftm` | INTEGER | Free throws made |
+| `fta` | INTEGER | Free throws attempted |
+| `ft_pct` | REAL | Free throw percentage |
+| `oreb` | INTEGER | Offensive rebounds |
+| `dreb` | INTEGER | Defensive rebounds |
+| `pf` | INTEGER | Personal fouls |
+| `plus_minus` | REAL | Plus/minus |
+
+**Team_Game_Stats**
+
+| Column | Type | Notes |
+|---|---|---|
+| `game_id` | TEXT | Composite PK, FK → Games |
+| `team_id` | INTEGER | Composite PK, FK → Teams |
+| `opponent_team_id` | INTEGER | |
+| `is_home` | INTEGER | |
+| `points_scored` | INTEGER | |
+| `points_allowed` | INTEGER | |
+| `pace_est` | REAL | |
+| `ortg_est` | REAL | |
+| `drtg_est` | REAL | |
+
+**Defense_Vs_Position**
+
+| Column | Type | Notes |
+|---|---|---|
+| `team_abbreviation` | TEXT | Composite PK |
+| `season` | TEXT | Composite PK |
+| `pos` | TEXT | Composite PK |
+| `vs_pts_mult` | REAL | Default 1.0 |
+| `vs_reb_mult` | REAL | Default 1.0 |
+| `vs_ast_mult` | REAL | Default 1.0 |
+| `vs_stl_mult` | REAL | Default 1.0 |
+| `vs_blk_mult` | REAL | Default 1.0 |
+| `vs_3pm_mult` | REAL | Default 1.0 |
+
+**Team_Roster**
+
+| Column | Type | Notes |
+|---|---|---|
+| `team_id` | INTEGER | Composite PK, FK → Teams |
+| `player_id` | INTEGER | Composite PK, FK → Players |
+| `effective_start_date` | TEXT | Composite PK |
+| `effective_end_date` | TEXT | |
+| `is_two_way` | INTEGER | Default 0 |
+| `is_g_league` | INTEGER | Default 0 |
+
+**Injury_Status**
+
+| Column | Type | Notes |
+|---|---|---|
+| `player_id` | INTEGER | Composite PK, FK → Players |
+| `team_id` | INTEGER | |
+| `report_date` | TEXT | Composite PK |
+| `status` | TEXT | Not null |
+| `reason` | TEXT | |
+| `source` | TEXT | |
+| `last_updated_ts` | TEXT | |

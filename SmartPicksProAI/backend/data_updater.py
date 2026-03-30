@@ -190,6 +190,9 @@ def _upsert_games(raw: pd.DataFrame, conn: sqlite3.Connection) -> None:
     - ``'LAL vs. BOS'`` → home is left abbreviation (``LAL``).
     - ``'LAL @ BOS'``   → home is right abbreviation (``BOS``).
 
+    ``home_team_id`` and ``away_team_id`` are derived from the MATCHUP and
+    TEAM_ID columns in the raw data.
+
     Args:
         raw: Raw game-log DataFrame.
         conn: Open SQLite connection.
@@ -201,8 +204,6 @@ def _upsert_games(raw: pd.DataFrame, conn: sqlite3.Connection) -> None:
     )
 
     games["season"] = SEASON
-    games["home_team_id"] = None
-    games["away_team_id"] = None
 
     def _parse_abbrevs(matchup: str):
         if " vs. " in matchup:
@@ -220,6 +221,20 @@ def _upsert_games(raw: pd.DataFrame, conn: sqlite3.Connection) -> None:
     else:
         games["home_abbrev"] = []
         games["away_abbrev"] = []
+
+    # Derive home_team_id / away_team_id from the raw per-player rows.
+    home_ids = (
+        raw.loc[raw["MATCHUP"].str.contains(" vs. ", na=False), ["GAME_ID", "TEAM_ID"]]
+        .drop_duplicates("GAME_ID")
+        .rename(columns={"GAME_ID": "game_id", "TEAM_ID": "home_team_id"})
+    )
+    away_ids = (
+        raw.loc[raw["MATCHUP"].str.contains(" @ ", na=False), ["GAME_ID", "TEAM_ID"]]
+        .drop_duplicates("GAME_ID")
+        .rename(columns={"GAME_ID": "game_id", "TEAM_ID": "away_team_id"})
+    )
+    games = games.merge(home_ids, on="game_id", how="left")
+    games = games.merge(away_ids, on="game_id", how="left")
 
     games = games[
         ["game_id", "game_date", "season", "home_team_id", "away_team_id",

@@ -12,11 +12,11 @@ Run this script exactly once to establish the historical baseline:
 """
 
 import logging
-import os
 import sqlite3
 
 import pandas as pd
 from nba_api.stats.endpoints import LeagueGameLog
+from nba_api.stats.static import teams as static_teams
 
 import setup_db
 
@@ -155,8 +155,10 @@ def build_games_df(raw: pd.DataFrame) -> pd.DataFrame:
     - ``'LAL vs. BOS'`` → home team is the left abbreviation (``LAL``).
     - ``'LAL @ BOS'``   → home team is the right abbreviation (``BOS``).
 
-    ``home_team_id`` and ``away_team_id`` are left as ``None`` for now (team
-    IDs require a separate lookup); populate via :func:`seed_teams_from_csv`.
+    ``home_team_id`` and ``away_team_id`` are derived from the MATCHUP and
+    TEAM_ID columns in the raw data: a ``vs.`` matchup means the player's
+    team is the home team, and an ``@`` matchup means the player's team is
+    the away team.
 
     Args:
         raw: Raw DataFrame returned by :func:`fetch_season_logs`.
@@ -179,8 +181,6 @@ def build_games_df(raw: pd.DataFrame) -> pd.DataFrame:
     )
 
     games["season"] = SEASON
-    games["home_team_id"] = None
-    games["away_team_id"] = None
 
     def _parse_abbrevs(matchup: str):
         if " vs. " in matchup:
@@ -197,6 +197,21 @@ def build_games_df(raw: pd.DataFrame) -> pd.DataFrame:
     ) if not games.empty else ([], [])
     games["home_abbrev"] = list(home_abbrevs)
     games["away_abbrev"] = list(away_abbrevs)
+
+    # Derive home_team_id / away_team_id from the raw per-player rows.
+    # A "vs." matchup means the row's TEAM_ID is the home team.
+    home_ids = (
+        raw.loc[raw["MATCHUP"].str.contains(" vs. ", na=False), ["GAME_ID", "TEAM_ID"]]
+        .drop_duplicates("GAME_ID")
+        .rename(columns={"GAME_ID": "game_id", "TEAM_ID": "home_team_id"})
+    )
+    away_ids = (
+        raw.loc[raw["MATCHUP"].str.contains(" @ ", na=False), ["GAME_ID", "TEAM_ID"]]
+        .drop_duplicates("GAME_ID")
+        .rename(columns={"GAME_ID": "game_id", "TEAM_ID": "away_team_id"})
+    )
+    games = games.merge(home_ids, on="game_id", how="left")
+    games = games.merge(away_ids, on="game_id", how="left")
 
     games = games[
         ["game_id", "game_date", "season", "home_team_id", "away_team_id",
@@ -269,51 +284,26 @@ def load_players(players: pd.DataFrame, conn: sqlite3.Connection) -> None:
     logger.info("Players table: upserted %d rows.", len(players))
 
 
-def seed_teams_from_csv(
-    conn: sqlite3.Connection,
-    csv_path: str = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
-        "data", "teams.csv",
-    ),
-) -> None:
-    """Seed the Teams table from a CSV file.
+def seed_teams_from_api(conn: sqlite3.Connection) -> None:
+    """Seed the Teams table from the ``nba_api`` static teams list.
 
-    Reads *csv_path* and inserts any rows whose ``team_id`` is not already
-    present in the Teams table.  Expected CSV columns (at minimum):
-    ``team_id``, ``abbreviation``, ``team_name``.  Optional columns:
-    ``conference``, ``division``, ``pace``, ``ortg``, ``drtg``.
+    Uses :func:`nba_api.stats.static.teams.get_teams` to load all 30 NBA
+    teams.  Rows whose ``team_id`` already exists in the table are skipped.
 
     Args:
-        conn:     Open SQLite connection.
-        csv_path: Path to the teams CSV file.  Defaults to
-                  ``<repo_root>/data/teams.csv``.
+        conn: Open SQLite connection.
     """
-    if not os.path.isfile(csv_path):
-        logger.warning(
-            "Teams CSV not found at %s — skipping Teams seed.", csv_path
-        )
-        return
+    all_teams = static_teams.get_teams()
+    teams = pd.DataFrame(all_teams)
+    teams = teams.rename(columns={"id": "team_id", "full_name": "team_name"})
 
-    teams = pd.read_csv(csv_path)
-    # Normalise column names to lower-case to be resilient to CSV variations.
-    teams.columns = [c.lower() for c in teams.columns]
-
-    required = {"team_id", "abbreviation", "team_name"}
-    missing = required - set(teams.columns)
-    if missing:
-        logger.warning(
-            "Teams CSV is missing required columns %s — skipping Teams seed.",
-            missing,
-        )
-        return
-
-    # Fill optional columns with None if absent.
-    for col in ("conference", "division", "pace", "ortg", "drtg"):
-        if col not in teams.columns:
-            teams[col] = None
-
-    teams = teams[["team_id", "abbreviation", "team_name",
-                   "conference", "division", "pace", "ortg", "drtg"]]
+    # Keep only columns that exist in the Teams schema.
+    teams = teams[["team_id", "abbreviation", "team_name"]]
+    teams["conference"] = None
+    teams["division"] = None
+    teams["pace"] = None
+    teams["ortg"] = None
+    teams["drtg"] = None
 
     existing = pd.read_sql("SELECT team_id FROM Teams", conn)
     new_rows = teams[~teams["team_id"].isin(existing["team_id"])]
@@ -321,7 +311,7 @@ def seed_teams_from_csv(
         logger.info("Teams table: no new rows to insert.")
         return
     new_rows.to_sql("Teams", conn, if_exists="append", index=False)
-    logger.info("Teams table: inserted %d rows from CSV.", len(new_rows))
+    logger.info("Teams table: inserted %d rows from nba_api.", len(new_rows))
 
 
 def load_games(games: pd.DataFrame, conn: sqlite3.Connection) -> None:
@@ -374,7 +364,7 @@ def run_initial_pull(db_path: str = DB_PATH, season: str = SEASON) -> None:
     """Orchestrate the full initial data pull and database seed.
 
     1. Ensures the database schema exists (calls :func:`setup_db.create_tables`).
-    2. Seeds the Teams table from ``data/teams.csv`` (if present).
+    2. Seeds the Teams table from ``nba_api`` static team data.
     3. Fetches all player game logs for *season*.
     4. Builds and loads the Players, Games, and Player_Game_Logs tables.
 
@@ -387,7 +377,7 @@ def run_initial_pull(db_path: str = DB_PATH, season: str = SEASON) -> None:
 
     conn = sqlite3.connect(db_path)
     try:
-        seed_teams_from_csv(conn)
+        seed_teams_from_api(conn)
         conn.commit()
     finally:
         conn.close()
