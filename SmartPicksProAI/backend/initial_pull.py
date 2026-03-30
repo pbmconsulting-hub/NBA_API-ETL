@@ -129,6 +129,10 @@ def build_logs_df(raw: pd.DataFrame) -> pd.DataFrame:
     ``player_id``, ``game_id``, ``pts``, ``reb``, ``ast``, ``blk``,
     ``stl``, ``tov``, ``min``.
 
+    **DNP handling:** Players who did not play (0 minutes, null/None stats)
+    have their numeric stat columns set to ``0`` and ``min`` set to
+    ``'0:00'`` so downstream ML math never encounters NaN values.
+
     Args:
         raw: Raw DataFrame returned by :func:`fetch_season_logs`.
 
@@ -149,6 +153,13 @@ def build_logs_df(raw: pd.DataFrame) -> pd.DataFrame:
             "MIN": "min",
         }
     )
+
+    # --- DNP / inactive edge-case handling ---
+    stat_cols = ["pts", "reb", "ast", "blk", "stl", "tov"]
+    for col in stat_cols:
+        logs[col] = pd.to_numeric(logs[col], errors="coerce").fillna(0).astype(int)
+    logs["min"] = logs["min"].fillna("0:00").replace("", "0:00")
+
     logger.info("Built Player_Game_Logs DataFrame: %d rows.", len(logs))
     return logs
 

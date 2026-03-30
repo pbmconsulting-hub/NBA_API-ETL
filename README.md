@@ -1,8 +1,9 @@
-# NBA_API-ETL — SmartPicksProAI Data Pipeline
+# NBA_API-ETL — SmartPicksProAI
 
-A local NBA data pipeline that extracts player performance data via
-[`nba_api`](https://github.com/swar/nba_api), transforms it with Pandas,
-stores it in a local SQLite database, and serves it via a FastAPI backend.
+A decoupled local application featuring a **Python/FastAPI backend** that
+harvests NBA player performance data and a **Streamlit frontend** that
+displays matchups, player stats, and admin controls in a dark "FinTech
+terminal" interface.
 
 The data feeds an ML model that predicts player props (over/unders on points,
 rebounds, assists, etc.) and generates daily betting picks.
@@ -12,13 +13,19 @@ rebounds, assists, etc.) and generates daily betting picks.
 ## Project Structure
 
 ```
-.
-├── setup_db.py       # Create the SQLite schema
-├── initial_pull.py   # One-time historical data seed
-├── data_updater.py   # On-demand incremental update module
-├── api.py            # FastAPI backend
-├── requirements.txt  # Python dependencies
-└── smartpicks.db     # SQLite database (created at runtime)
+SmartPicksProAI/
+├── backend/
+│   ├── setup_db.py        # Create the SQLite schema
+│   ├── initial_pull.py    # One-time historical data seed
+│   ├── data_updater.py    # On-demand incremental update module
+│   └── api.py             # FastAPI backend (port 8000)
+│
+├── frontend/
+│   ├── api_service.py     # HTTP client with Streamlit caching
+│   └── app.py             # Streamlit dashboard
+│
+├── requirements.txt       # Python dependencies
+└── README.md
 ```
 
 ---
@@ -34,15 +41,17 @@ pip install -r requirements.txt
 ### 2. Create the database schema
 
 ```bash
+cd SmartPicksProAI/backend
 python setup_db.py
 ```
 
-This creates `smartpicks.db` with three tables: **Players**, **Games**, and
+Creates `smartpicks.db` with three tables: **Players**, **Games**, and
 **Player_Game_Logs**.  Safe to run multiple times — uses `IF NOT EXISTS`.
 
 ### 3. Seed historical data (run once)
 
 ```bash
+cd SmartPicksProAI/backend
 python initial_pull.py
 ```
 
@@ -51,15 +60,29 @@ populates all three tables.  This may take a minute due to API rate limits.
 
 ---
 
-## Starting the API Server
+## Running the Application
+
+### Start the FastAPI backend
 
 ```bash
+cd SmartPicksProAI/backend
 python api.py
 # or
-uvicorn api:app --reload
+uvicorn api:app --reload --port 8000
 ```
 
 The server listens on `http://localhost:8000`.
+
+### Start the Streamlit frontend
+
+In a **separate terminal**:
+
+```bash
+cd SmartPicksProAI/frontend
+streamlit run app.py
+```
+
+The dashboard opens at `http://localhost:8501`.
 
 ---
 
@@ -128,15 +151,27 @@ between the last stored date and yesterday, then appends new rows.
 
 ---
 
+## Frontend Features
+
+| Feature | Description |
+|---|---|
+| **Today's Matchup Grid** | Displays NBA games scheduled for today in a card layout. |
+| **Player Performance Card** | Enter a player ID to view last 5 game logs, stat averages, and a data table. |
+| **Admin Sync Button** | Sidebar button triggers `POST /api/admin/refresh-data`, with a spinner and success/error toast. |
+| **Response Caching** | GET requests are cached for 1 hour via `@st.cache_data(ttl=3600)` to prevent redundant API calls. |
+
+---
+
 ## File Descriptions
 
 | File | Purpose |
 |---|---|
-| `setup_db.py` | Creates `smartpicks.db` and the three tables with `IF NOT EXISTS` guards. |
-| `initial_pull.py` | One-time seed script — pulls the full 2025-26 season via `LeagueGameLog`, cleans/renames columns, and loads all three tables. |
-| `data_updater.py` | Exposes `run_update()` — finds the latest date in the DB, fetches only new games, and appends them. No scheduling loops. |
-| `api.py` | FastAPI app with three endpoints: last-5 stats, today's games, and manual refresh trigger. |
-| `requirements.txt` | Python package dependencies. |
+| `backend/setup_db.py` | Creates `smartpicks.db` and the three tables with `IF NOT EXISTS` guards. |
+| `backend/initial_pull.py` | One-time seed script — pulls the full 2025-26 season via `LeagueGameLog`, cleans/renames columns, handles DNP edge cases, and loads all three tables. |
+| `backend/data_updater.py` | Exposes `run_update()` — finds the latest date in the DB, fetches only new games, handles DNP/null stats, and appends them. No scheduling loops. |
+| `backend/api.py` | FastAPI app with three endpoints: last-5 stats, today's games, and manual refresh trigger. |
+| `frontend/api_service.py` | HTTP client using `requests` with `@st.cache_data` caching and error handling. |
+| `frontend/app.py` | Streamlit dashboard with dark FinTech theme, matchup grid, player card, and admin controls. |
 
 ---
 
@@ -166,10 +201,10 @@ between the last stored date and yesterday, then appends new rows.
 | `log_id` | INTEGER | Primary key, auto-increment |
 | `player_id` | INTEGER | Foreign key → Players |
 | `game_id` | TEXT | Foreign key → Games |
-| `pts` | INTEGER | Points |
-| `reb` | INTEGER | Rebounds |
-| `ast` | INTEGER | Assists |
-| `blk` | INTEGER | Blocks |
-| `stl` | INTEGER | Steals |
-| `tov` | INTEGER | Turnovers |
-| `min` | TEXT | Minutes played |
+| `pts` | INTEGER | Points (0 for DNP) |
+| `reb` | INTEGER | Rebounds (0 for DNP) |
+| `ast` | INTEGER | Assists (0 for DNP) |
+| `blk` | INTEGER | Blocks (0 for DNP) |
+| `stl` | INTEGER | Steals (0 for DNP) |
+| `tov` | INTEGER | Turnovers (0 for DNP) |
+| `min` | TEXT | Minutes played (`0:00` for DNP) |

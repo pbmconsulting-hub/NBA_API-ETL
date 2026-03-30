@@ -155,6 +155,10 @@ def _upsert_games(raw: pd.DataFrame, conn: sqlite3.Connection) -> None:
 def _upsert_logs(raw: pd.DataFrame, conn: sqlite3.Connection) -> int:
     """Insert new player-game log rows that are not already in the database.
 
+    **DNP handling:** Players who did not play (0 minutes, null/None stats)
+    have their numeric stat columns set to ``0`` and ``min`` set to
+    ``'0:00'`` so downstream ML math never encounters NaN values.
+
     Args:
         raw: Raw game-log DataFrame.
         conn: Open SQLite connection.
@@ -176,6 +180,12 @@ def _upsert_logs(raw: pd.DataFrame, conn: sqlite3.Connection) -> int:
             "MIN": "min",
         }
     )
+
+    # --- DNP / inactive edge-case handling ---
+    stat_cols = ["pts", "reb", "ast", "blk", "stl", "tov"]
+    for col in stat_cols:
+        logs[col] = pd.to_numeric(logs[col], errors="coerce").fillna(0).astype(int)
+    logs["min"] = logs["min"].fillna("0:00").replace("", "0:00")
 
     existing = pd.read_sql("SELECT player_id, game_id FROM Player_Game_Logs", conn)
     if existing.empty:
