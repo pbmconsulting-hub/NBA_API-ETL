@@ -59,8 +59,9 @@ python initial_pull.py
 
 Fetches every player game log for the **2025-26 NBA regular season**, seeds
 the **Teams** table from `nba_api` static data, and populates **Players**,
-**Games**, and **Player_Game_Logs**.  This may take a minute due to API rate
-limits.
+**Games**, **Player_Game_Logs**, **Team_Game_Stats**, and **Team_Roster**
+(including player positions).  This may take a few minutes due to API rate
+limits (one request per team for roster data).
 
 ---
 
@@ -123,6 +124,32 @@ GET /api/players/2544/last5
 }
 ```
 
+### `GET /api/players/search?q=name`
+
+Search for players by name (case-insensitive, returns up to 25 results).
+
+**Example:**
+```
+GET /api/players/search?q=LeBron
+```
+
+**Response:**
+```json
+{
+  "results": [
+    {
+      "player_id": 2544,
+      "first_name": "LeBron",
+      "last_name": "James",
+      "full_name": "LeBron James",
+      "team_id": 1610612747,
+      "team_abbreviation": "LAL",
+      "position": "F"
+    }
+  ]
+}
+```
+
 ### `GET /api/games/today`
 
 Returns today's NBA matchups.  Checks the local database first; if no games
@@ -139,10 +166,44 @@ are found, fetches live data via `ScoreboardV3`.
 }
 ```
 
+### `GET /api/teams`
+
+Lists all 30 NBA teams stored in the database.
+
+**Response:**
+```json
+{
+  "teams": [
+    {"team_id": 1610612737, "abbreviation": "ATL", "team_name": "Atlanta Hawks"}
+  ]
+}
+```
+
+### `GET /api/teams/{team_id}/roster`
+
+Returns the roster for a specific team.
+
+**Response:**
+```json
+{
+  "team_id": 1610612747,
+  "players": [
+    {
+      "player_id": 2544,
+      "first_name": "LeBron",
+      "last_name": "James",
+      "full_name": "LeBron James",
+      "position": "F",
+      "team_abbreviation": "LAL"
+    }
+  ]
+}
+```
+
 ### `POST /api/admin/refresh-data`
 
-Triggers an on-demand incremental data update.  Fetches all player game logs
-between the last stored date and yesterday, then appends new rows.
+Triggers an on-demand incremental data update.  Fetches all player and team
+game logs between the last stored date and yesterday, then appends new rows.
 
 **Response:**
 ```json
@@ -160,7 +221,9 @@ between the last stored date and yesterday, then appends new rows.
 | Feature | Description |
 |---|---|
 | **Today's Matchup Grid** | Displays NBA games scheduled for today in a card layout. |
-| **Player Performance Card** | Enter a player ID to view last 5 game logs, stat averages, and a data table. |
+| **Player Search** | Search for players by name (e.g. "LeBron") — no need to know player IDs. |
+| **Player Performance Card** | View last 5 game logs, full stat averages (all 19 stat columns), and a data table. |
+| **Team Browser** | Sidebar dropdown to select any NBA team and view its current roster. |
 | **Admin Sync Button** | Sidebar button triggers `POST /api/admin/refresh-data`, with a spinner and success/error toast. |
 | **Response Caching** | GET requests are cached for 1 hour via `@st.cache_data(ttl=3600)` to prevent redundant API calls. |
 
@@ -171,11 +234,11 @@ between the last stored date and yesterday, then appends new rows.
 | File | Purpose |
 |---|---|
 | `backend/setup_db.py` | Creates `smartpicks.db` and all eight tables with `IF NOT EXISTS` guards and `ALTER TABLE` migration support. |
-| `backend/initial_pull.py` | One-time seed script — seeds Teams from `nba_api` static data, pulls the full 2025-26 season via `LeagueGameLog`, cleans/renames columns, handles DNP edge cases, and loads Players, Games, and Player_Game_Logs. |
-| `backend/data_updater.py` | Exposes `run_update()` — finds the latest date in the DB, fetches only new games, handles DNP/null stats, and appends them. No scheduling loops. |
-| `backend/api.py` | FastAPI app with three endpoints: last-5 stats, today's games, and manual refresh trigger. |
-| `frontend/api_service.py` | HTTP client using `requests` with `@st.cache_data` caching and error handling. |
-| `frontend/app.py` | Streamlit dashboard with dark FinTech theme, matchup grid, player card, and admin controls. |
+| `backend/initial_pull.py` | One-time seed script — seeds Teams from `nba_api` static data, pulls the full 2025-26 season via `LeagueGameLog` (player + team level), fetches rosters via `CommonTeamRoster`, and loads all core tables including Team_Game_Stats and Team_Roster. |
+| `backend/data_updater.py` | Exposes `run_update()` — finds the latest date in the DB, fetches only new player and team game logs, handles DNP/null stats, updates Team_Game_Stats, and appends them. No scheduling loops. |
+| `backend/api.py` | FastAPI app with six endpoints: last-5 stats, player search, today's games, team list, team roster, and manual refresh trigger. |
+| `frontend/api_service.py` | HTTP client using `requests` with `@st.cache_data` caching and error handling for all six endpoints. |
+| `frontend/app.py` | Streamlit dashboard with dark FinTech theme, matchup grid, player name search, team browser, and admin controls. |
 
 ---
 

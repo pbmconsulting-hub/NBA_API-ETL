@@ -12,7 +12,14 @@ unreachable, keeping the dashboard functional even if the API server is down.
 
 Usage::
 
-    from api_service import get_todays_games, get_player_last5, trigger_refresh
+    from api_service import (
+        get_todays_games,
+        get_player_last5,
+        search_players,
+        get_teams,
+        get_team_roster,
+        trigger_refresh,
+    )
 """
 
 import logging
@@ -86,6 +93,75 @@ def get_player_last5(player_id: int) -> dict:
     except Exception as exc:
         logger.error("Failed to fetch last-5 for player %d: %s", player_id, exc)
         return {}
+
+
+@st.cache_data(ttl=3600)
+def search_players(query: str) -> list[dict]:
+    """Search for players by name.
+
+    Calls ``GET /api/players/search?q=<query>`` and returns the ``results``
+    list.  Cached for 1 hour.
+
+    Args:
+        query: Free-text search string (e.g. ``'LeBron'``).
+
+    Returns:
+        A list of matching player dicts, or an empty list on error.
+    """
+    try:
+        resp = requests.get(
+            f"{BASE_URL}/api/players/search",
+            params={"q": query},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        return resp.json().get("results", [])
+    except Exception as exc:
+        logger.error("Failed to search players for q=%s: %s", query, exc)
+        return []
+
+
+@st.cache_data(ttl=3600)
+def get_teams() -> list[dict]:
+    """Fetch the list of all NBA teams from the backend.
+
+    Calls ``GET /api/teams`` and returns the ``teams`` list.
+    Cached for 1 hour.
+
+    Returns:
+        A list of team dicts, or an empty list on error.
+    """
+    try:
+        resp = requests.get(f"{BASE_URL}/api/teams", timeout=15)
+        resp.raise_for_status()
+        return resp.json().get("teams", [])
+    except Exception as exc:
+        logger.error("Failed to fetch teams: %s", exc)
+        return []
+
+
+@st.cache_data(ttl=3600)
+def get_team_roster(team_id: int) -> list[dict]:
+    """Fetch a team's roster from the backend.
+
+    Calls ``GET /api/teams/{team_id}/roster`` and returns the ``players``
+    list.  Cached for 1 hour.
+
+    Args:
+        team_id: The NBA team ID.
+
+    Returns:
+        A list of player dicts, or an empty list on error.
+    """
+    try:
+        resp = requests.get(
+            f"{BASE_URL}/api/teams/{team_id}/roster", timeout=15
+        )
+        resp.raise_for_status()
+        return resp.json().get("players", [])
+    except Exception as exc:
+        logger.error("Failed to fetch roster for team %d: %s", team_id, exc)
+        return []
 
 
 # ---------------------------------------------------------------------------

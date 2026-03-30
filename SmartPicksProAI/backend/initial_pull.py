@@ -7,15 +7,20 @@ Fetches every player game log for the entire 2025-26 NBA regular season via
 the nba_api LeagueGameLog endpoint, cleans and transforms the data with
 Pandas, and loads it into the SQLite tables defined in setup_db.py.
 
+Also seeds the Teams table from static data, populates Team_Game_Stats from
+team-level game logs, and loads Team_Roster / player positions via the
+CommonTeamRoster endpoint.
+
 Run this script exactly once to establish the historical baseline:
     python initial_pull.py
 """
 
 import logging
 import sqlite3
+import time
 
 import pandas as pd
-from nba_api.stats.endpoints import LeagueGameLog
+from nba_api.stats.endpoints import CommonTeamRoster, LeagueGameLog
 from nba_api.stats.static import teams as static_teams
 
 import setup_db
@@ -96,6 +101,35 @@ def fetch_season_logs(season: str = SEASON) -> pd.DataFrame:
     )
     df = endpoint.get_data_frames()[0]
     logger.info("Retrieved %d rows from the API.", len(df))
+    return df
+
+
+def fetch_team_season_logs(season: str = SEASON) -> pd.DataFrame:
+    """Fetch all **team-level** game logs for *season* from the NBA API.
+
+    Uses LeagueGameLog with ``player_or_team_abbreviation='T'`` to retrieve
+    per-team box scores.  Returns two rows per game (one for each team).
+
+    The returned DataFrame contains columns::
+
+        SEASON_ID, TEAM_ID, TEAM_ABBREVIATION, TEAM_NAME, GAME_ID,
+        GAME_DATE, MATCHUP, WL, MIN, FGM, FGA, FG_PCT, … PTS, PLUS_MINUS
+
+    Args:
+        season: NBA season string, e.g. ``'2025-26'``.
+
+    Returns:
+        DataFrame of raw team-level game logs.
+    """
+    logger.info("Fetching team game logs for season %s …", season)
+    time.sleep(2)  # Respect NBA API rate limits.
+    endpoint = LeagueGameLog(
+        player_or_team_abbreviation="T",
+        season=season,
+        season_type_all_star="Regular Season",
+    )
+    df = endpoint.get_data_frames()[0]
+    logger.info("Retrieved %d team-level rows from the API.", len(df))
     return df
 
 
@@ -256,6 +290,63 @@ def build_logs_df(raw: pd.DataFrame) -> pd.DataFrame:
     return logs
 
 
+def build_team_game_stats_df(raw_team: pd.DataFrame) -> pd.DataFrame:
+    """Build the Team_Game_Stats table from team-level LeagueGameLog data.
+
+    Each game produces **two rows** (one per participating team).  For each
+    row the function determines:
+
+    - ``is_home`` — ``1`` if the team's MATCHUP contains ``' vs. '``.
+    - ``opponent_team_id`` — the other team's TEAM_ID in the same game.
+    - ``points_allowed`` — the opponent's PTS in the same game.
+
+    ``pace_est``, ``ortg_est``, and ``drtg_est`` are left as ``None`` (they
+    require advanced box-score calculations and can be populated later).
+
+    Args:
+        raw_team: Raw DataFrame returned by :func:`fetch_team_season_logs`.
+
+    Returns:
+        DataFrame with columns ``game_id``, ``team_id``, ``opponent_team_id``,
+        ``is_home``, ``points_scored``, ``points_allowed``, ``pace_est``,
+        ``ortg_est``, ``drtg_est``.
+    """
+    if raw_team.empty:
+        return pd.DataFrame(
+            columns=["game_id", "team_id", "opponent_team_id", "is_home",
+                     "points_scored", "points_allowed", "pace_est",
+                     "ortg_est", "drtg_est"]
+        )
+
+    df = raw_team[["GAME_ID", "TEAM_ID", "MATCHUP", "PTS"]].copy()
+    df = df.rename(columns={
+        "GAME_ID": "game_id",
+        "TEAM_ID": "team_id",
+        "PTS": "points_scored",
+    })
+    df["is_home"] = df["MATCHUP"].str.contains(" vs. ", na=False).astype(int)
+    df = df.drop(columns=["MATCHUP"])
+
+    # Self-join to find opponent's team_id and PTS for each game.
+    opp = df[["game_id", "team_id", "points_scored"]].rename(columns={
+        "team_id": "opponent_team_id",
+        "points_scored": "points_allowed",
+    })
+    merged = df.merge(opp, on="game_id")
+    merged = merged[merged["team_id"] != merged["opponent_team_id"]]
+
+    merged["pace_est"] = None
+    merged["ortg_est"] = None
+    merged["drtg_est"] = None
+
+    result = merged[
+        ["game_id", "team_id", "opponent_team_id", "is_home",
+         "points_scored", "points_allowed", "pace_est", "ortg_est", "drtg_est"]
+    ]
+    logger.info("Built Team_Game_Stats DataFrame: %d rows.", len(result))
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Data Loading
 # ---------------------------------------------------------------------------
@@ -355,6 +446,125 @@ def load_logs(logs: pd.DataFrame, conn: sqlite3.Connection) -> None:
     logger.info("Player_Game_Logs table: inserted %d new rows.", len(new_rows))
 
 
+def load_team_game_stats(
+    stats: pd.DataFrame, conn: sqlite3.Connection
+) -> None:
+    """Append *stats* into Team_Game_Stats, skipping existing (game, team) pairs.
+
+    Args:
+        stats: DataFrame produced by :func:`build_team_game_stats_df`.
+        conn: Open SQLite connection.
+    """
+    if stats.empty:
+        logger.info("Team_Game_Stats table: no rows to insert.")
+        return
+    existing = pd.read_sql(
+        "SELECT game_id, team_id FROM Team_Game_Stats", conn
+    )
+    if existing.empty:
+        new_rows = stats
+    else:
+        merged = stats.merge(
+            existing, on=["game_id", "team_id"], how="left", indicator=True
+        )
+        new_rows = stats[merged["_merge"] == "left_only"].copy()
+
+    if new_rows.empty:
+        logger.info("Team_Game_Stats table: no new rows to insert.")
+        return
+    new_rows.to_sql("Team_Game_Stats", conn, if_exists="append", index=False)
+    logger.info("Team_Game_Stats table: inserted %d new rows.", len(new_rows))
+
+
+def fetch_and_load_rosters(
+    conn: sqlite3.Connection, season: str = SEASON
+) -> None:
+    """Fetch current rosters for all teams and load into Team_Roster.
+
+    Iterates over every team in the Teams table, calls the
+    :class:`~nba_api.stats.endpoints.CommonTeamRoster` endpoint for each,
+    and inserts new rows into ``Team_Roster``.
+
+    As a side-effect, updates ``Players.position`` for every player found on
+    a roster (the position field is otherwise left as ``None`` by the
+    game-log-only pipeline).
+
+    Args:
+        conn: Open SQLite connection.
+        season: NBA season string, e.g. ``'2025-26'``.
+    """
+    team_ids = pd.read_sql("SELECT team_id FROM Teams", conn)["team_id"].tolist()
+    if not team_ids:
+        logger.warning("No teams in DB — cannot fetch rosters.")
+        return
+
+    all_roster_rows: list[dict] = []
+    position_updates: list[tuple] = []
+
+    for tid in team_ids:
+        try:
+            time.sleep(2)  # Respect NBA API rate limits.
+            roster_ep = CommonTeamRoster(team_id=tid, season=season)
+            df = roster_ep.get_data_frames()[0]  # CommonTeamRoster result set
+        except Exception as exc:
+            logger.warning("Failed to fetch roster for team %d: %s", tid, exc)
+            continue
+
+        if df.empty:
+            continue
+
+        for _, row in df.iterrows():
+            pid = row.get("PLAYER_ID")
+            pos = row.get("POSITION", None)
+            if pid is None:
+                continue
+            all_roster_rows.append({
+                "team_id": tid,
+                "player_id": int(pid),
+                "effective_start_date": season,
+                "effective_end_date": None,
+                "is_two_way": 0,
+                "is_g_league": 0,
+            })
+            if pos:
+                position_updates.append((pos, int(pid)))
+
+    # Load Team_Roster rows.
+    if all_roster_rows:
+        roster_df = pd.DataFrame(all_roster_rows)
+        existing = pd.read_sql(
+            "SELECT team_id, player_id, effective_start_date FROM Team_Roster",
+            conn,
+        )
+        if existing.empty:
+            new_rows = roster_df
+        else:
+            merged = roster_df.merge(
+                existing,
+                on=["team_id", "player_id", "effective_start_date"],
+                how="left",
+                indicator=True,
+            )
+            new_rows = roster_df[merged["_merge"] == "left_only"].copy()
+
+        if not new_rows.empty:
+            new_rows.to_sql("Team_Roster", conn, if_exists="append", index=False)
+            logger.info("Team_Roster: inserted %d rows.", len(new_rows))
+        else:
+            logger.info("Team_Roster: no new rows to insert.")
+    else:
+        logger.info("Team_Roster: no roster data retrieved.")
+
+    # Update Players.position where known.
+    if position_updates:
+        cursor = conn.cursor()
+        cursor.executemany(
+            "UPDATE Players SET position = ? WHERE player_id = ?",
+            position_updates,
+        )
+        logger.info("Players.position: updated %d rows.", len(position_updates))
+
+
 # ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
@@ -367,6 +577,9 @@ def run_initial_pull(db_path: str = DB_PATH, season: str = SEASON) -> None:
     2. Seeds the Teams table from ``nba_api`` static team data.
     3. Fetches all player game logs for *season*.
     4. Builds and loads the Players, Games, and Player_Game_Logs tables.
+    5. Fetches team-level game logs and populates Team_Game_Stats.
+    6. Fetches rosters for every team and populates Team_Roster and
+       Players.position.
 
     Args:
         db_path: Path to the SQLite database file.
@@ -382,18 +595,29 @@ def run_initial_pull(db_path: str = DB_PATH, season: str = SEASON) -> None:
     finally:
         conn.close()
 
+    # --- Player game logs ---
     raw = fetch_season_logs(season)
 
     players_df = build_players_df(raw)
     games_df = build_games_df(raw)
     logs_df = build_logs_df(raw)
 
+    # --- Team game logs ---
+    raw_team = fetch_team_season_logs(season)
+    team_stats_df = build_team_game_stats_df(raw_team)
+
     conn = sqlite3.connect(db_path)
     try:
         load_players(players_df, conn)
         load_games(games_df, conn)
         load_logs(logs_df, conn)
+        load_team_game_stats(team_stats_df, conn)
         conn.commit()
+
+        # --- Rosters (rate-limited: 1 req / team) ---
+        fetch_and_load_rosters(conn, season)
+        conn.commit()
+
         logger.info("=== Initial pull complete. Database is ready. ===")
     finally:
         conn.close()

@@ -23,6 +23,7 @@ from datetime import date, datetime, timedelta
 import pandas as pd
 from nba_api.stats.endpoints import LeagueGameLog
 
+import initial_pull
 import setup_db
 
 logging.basicConfig(
@@ -124,6 +125,38 @@ def _fetch_logs_for_range(date_from: date, date_to: date) -> pd.DataFrame:
     time.sleep(2)  # Respect NBA API rate limits.
     df = endpoint.get_data_frames()[0]
     logger.info("API returned %d rows.", len(df))
+    return df
+
+
+def _fetch_team_logs_for_range(date_from: date, date_to: date) -> pd.DataFrame:
+    """Fetch **team-level** game logs between *date_from* and *date_to*.
+
+    Mirrors :func:`_fetch_logs_for_range` but with
+    ``player_or_team_abbreviation='T'``.
+
+    Args:
+        date_from: Start date (inclusive).
+        date_to:   End date (inclusive).
+
+    Returns:
+        Raw DataFrame of team-level game logs.
+    """
+    str_from = date_from.strftime(_NBA_DATE_FMT)
+    str_to = date_to.strftime(_NBA_DATE_FMT)
+    logger.info(
+        "Fetching team logs from %s to %s …", str_from, str_to
+    )
+
+    endpoint = LeagueGameLog(
+        player_or_team_abbreviation="T",
+        season=SEASON,
+        season_type_all_star="Regular Season",
+        date_from_nullable=str_from,
+        date_to_nullable=str_to,
+    )
+    time.sleep(2)  # Respect NBA API rate limits.
+    df = endpoint.get_data_frames()[0]
+    logger.info("Team-level API returned %d rows.", len(df))
     return df
 
 
@@ -295,6 +328,26 @@ def _upsert_logs(raw: pd.DataFrame, conn: sqlite3.Connection) -> int:
     return len(new_rows)
 
 
+def _upsert_team_game_stats(
+    raw_team: pd.DataFrame, conn: sqlite3.Connection
+) -> None:
+    """Insert new Team_Game_Stats rows from team-level game log data.
+
+    Delegates to :func:`initial_pull.build_team_game_stats_df` and
+    :func:`initial_pull.load_team_game_stats` to reuse the shared transform
+    and load logic.
+
+    Args:
+        raw_team: Raw team-level game-log DataFrame.
+        conn: Open SQLite connection.
+    """
+    if raw_team.empty:
+        logger.info("Team_Game_Stats: no team data to process.")
+        return
+    stats = initial_pull.build_team_game_stats_df(raw_team)
+    initial_pull.load_team_game_stats(stats, conn)
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -311,12 +364,13 @@ def run_update(db_path: str = DB_PATH) -> int:
        0 (run ``initial_pull.py`` first).
     3. Fetches all player game logs between ``last_date + 1 day`` and
        yesterday using the NBA API.
-    4. De-duplicates and appends new rows to all three tables.
+    4. De-duplicates and appends new rows to Players, Games,
+       Player_Game_Logs, and Team_Game_Stats.
     5. Returns the total count of new ``Player_Game_Logs`` rows inserted.
 
     There are **no loops, no scheduling, and no ``while True`` blocks**.
-    A single ``time.sleep(2)`` is called inside :func:`_fetch_logs_for_range`
-    after each API request.
+    A single ``time.sleep(2)`` is called inside each fetch helper after
+    every API request.
 
     Args:
         db_path: Path to the SQLite database file.
@@ -358,6 +412,11 @@ def run_update(db_path: str = DB_PATH) -> int:
         _upsert_players(raw, conn)
         _upsert_games(raw, conn)
         new_log_count = _upsert_logs(raw, conn)
+
+        # Also update Team_Game_Stats from team-level logs.
+        raw_team = _fetch_team_logs_for_range(date_from, yesterday)
+        _upsert_team_game_stats(raw_team, conn)
+
         conn.commit()
         logger.info(
             "=== Update complete. %d new log records added. ===", new_log_count

@@ -278,6 +278,135 @@ def refresh_data() -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Player / Team lookup endpoints
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/players/search")
+def search_players(q: str = "") -> dict:
+    """Search for players by name.
+
+    Performs a case-insensitive ``LIKE`` search against ``full_name``,
+    ``first_name``, and ``last_name`` in the Players table.  Returns up to
+    25 matching players with basic info (id, name, team, position).
+
+    Args:
+        q: Search query string (e.g. ``'LeBron'``).
+
+    Returns:
+        JSON with a ``results`` list of matching player dicts.
+
+    Raises:
+        HTTPException 500: On unexpected database errors.
+    """
+    logger.info("GET /api/players/search?q=%s", q)
+    if not q.strip():
+        return {"results": []}
+
+    conn = _get_conn()
+    try:
+        pattern = f"%{q.strip()}%"
+        rows = conn.execute(
+            """
+            SELECT player_id, first_name, last_name, full_name,
+                   team_id, team_abbreviation, position
+            FROM Players
+            WHERE full_name LIKE ?
+               OR first_name LIKE ?
+               OR last_name LIKE ?
+            ORDER BY full_name
+            LIMIT 25
+            """,
+            (pattern, pattern, pattern),
+        ).fetchall()
+        return {"results": [dict(r) for r in rows]}
+    except Exception as exc:
+        logger.exception("Error searching players for q=%s.", q)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    finally:
+        conn.close()
+
+
+@app.get("/api/teams")
+def get_teams() -> dict:
+    """List all NBA teams stored in the database.
+
+    Returns:
+        JSON with a ``teams`` list sorted by abbreviation.
+
+    Raises:
+        HTTPException 500: On unexpected database errors.
+    """
+    logger.info("GET /api/teams")
+    conn = _get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT team_id, abbreviation, team_name, conference, division "
+            "FROM Teams ORDER BY abbreviation"
+        ).fetchall()
+        return {"teams": [dict(r) for r in rows]}
+    except Exception as exc:
+        logger.exception("Error fetching teams list.")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    finally:
+        conn.close()
+
+
+@app.get("/api/teams/{team_id}/roster")
+def get_team_roster(team_id: int) -> dict:
+    """Return the current roster for a specific team.
+
+    Joins ``Team_Roster`` with ``Players`` to return player info for every
+    player currently assigned to the team.  Falls back to a direct lookup
+    in the ``Players`` table (by ``team_id``) if the ``Team_Roster`` table
+    is not yet populated.
+
+    Args:
+        team_id: The NBA team ID.
+
+    Returns:
+        JSON with ``team_id`` and a ``players`` list.
+
+    Raises:
+        HTTPException 500: On unexpected database errors.
+    """
+    logger.info("GET /api/teams/%d/roster", team_id)
+    conn = _get_conn()
+    try:
+        rows = conn.execute(
+            """
+            SELECT p.player_id, p.first_name, p.last_name, p.full_name,
+                   p.position, p.team_abbreviation
+            FROM Team_Roster r
+            JOIN Players p ON p.player_id = r.player_id
+            WHERE r.team_id = ?
+            ORDER BY p.last_name
+            """,
+            (team_id,),
+        ).fetchall()
+
+        # Fallback: if Team_Roster has no rows for this team, use Players.team_id.
+        if not rows:
+            rows = conn.execute(
+                """
+                SELECT player_id, first_name, last_name, full_name,
+                       position, team_abbreviation
+                FROM Players
+                WHERE team_id = ?
+                ORDER BY last_name
+                """,
+                (team_id,),
+            ).fetchall()
+
+        return {"team_id": team_id, "players": [dict(r) for r in rows]}
+    except Exception as exc:
+        logger.exception("Error fetching roster for team %d.", team_id)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
