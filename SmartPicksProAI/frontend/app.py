@@ -16,6 +16,8 @@ Start the dashboard::
 import pandas as pd
 import streamlit as st
 
+from typing import Optional
+
 from api_service import (
     get_player_last5,
     get_team_roster,
@@ -208,7 +210,7 @@ with id_col:
     )
 
 # Resolve which player_id to display.
-selected_player_id: int | None = None
+selected_player_id: Optional[int] = None
 
 if player_query.strip():
     results = search_players(player_query.strip())
