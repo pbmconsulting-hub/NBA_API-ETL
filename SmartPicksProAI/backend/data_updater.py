@@ -19,6 +19,7 @@ import logging
 import sqlite3
 import time
 from datetime import date, datetime, timedelta
+from typing import Optional
 
 import pandas as pd
 from nba_api.stats.endpoints import LeagueGameLog
@@ -80,7 +81,7 @@ _FLOAT_STAT_COLS = ["fg_pct", "fg3_pct", "ft_pct", "plus_minus"]
 # ---------------------------------------------------------------------------
 
 
-def _get_last_game_date(conn: sqlite3.Connection) -> date | None:
+def _get_last_game_date(conn: sqlite3.Connection) -> Optional[date]:
     """Return the most recent ``game_date`` stored in the Games table.
 
     Args:
@@ -251,6 +252,8 @@ def _upsert_games(raw: pd.DataFrame, conn: sqlite3.Connection) -> None:
         home_abbrevs, away_abbrevs = zip(*games["matchup"].map(_parse_abbrevs))
         games["home_abbrev"] = list(home_abbrevs)
         games["away_abbrev"] = list(away_abbrevs)
+        # Normalise matchup to always use "{HOME} vs. {AWAY}" format.
+        games["matchup"] = games["home_abbrev"] + " vs. " + games["away_abbrev"]
     else:
         games["home_abbrev"] = []
         games["away_abbrev"] = []
@@ -301,6 +304,9 @@ def _upsert_logs(raw: pd.DataFrame, conn: sqlite3.Connection) -> int:
     available_cols = [c for c in STAT_COLS_MAP if c in raw.columns]
     logs = raw[available_cols].copy()
     logs = logs.rename(columns={k: v for k, v in STAT_COLS_MAP.items() if k in available_cols})
+
+    # Deduplicate on the composite PK to avoid IntegrityError on insert.
+    logs = logs.drop_duplicates(subset=["player_id", "game_id"])
 
     # --- DNP / inactive edge-case handling ---
     for col in _INT_STAT_COLS:

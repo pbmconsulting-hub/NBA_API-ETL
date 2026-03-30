@@ -231,6 +231,16 @@ def create_tables(db_path: str = DB_PATH) -> None:
         logger.info("Creating table: Injury_Status")
         cursor.execute(CREATE_INJURY_STATUS)
 
+        # Performance indexes for frequently-used queries.
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_games_date "
+            "ON Games (game_date)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_players_fullname "
+            "ON Players (full_name)"
+        )
+
         # Migrate existing databases by adding new columns where absent.
         for stmt in _PLAYERS_ALTER + _GAMES_ALTER + _LOGS_ALTER:
             try:

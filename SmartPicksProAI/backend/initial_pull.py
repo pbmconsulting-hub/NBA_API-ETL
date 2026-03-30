@@ -232,6 +232,12 @@ def build_games_df(raw: pd.DataFrame) -> pd.DataFrame:
     games["home_abbrev"] = list(home_abbrevs)
     games["away_abbrev"] = list(away_abbrevs)
 
+    # Normalise the matchup column to always use the home team's perspective
+    # ("{HOME} vs. {AWAY}") so the value is deterministic regardless of which
+    # raw row was kept by drop_duplicates above.
+    if not games.empty:
+        games["matchup"] = games["home_abbrev"] + " vs. " + games["away_abbrev"]
+
     # Derive home_team_id / away_team_id from the raw per-player rows.
     # A "vs." matchup means the row's TEAM_ID is the home team.
     home_ids = (
@@ -275,6 +281,9 @@ def build_logs_df(raw: pd.DataFrame) -> pd.DataFrame:
     available_cols = [c for c in STAT_COLS_MAP if c in raw.columns]
     logs = raw[available_cols].copy()
     logs = logs.rename(columns={k: v for k, v in STAT_COLS_MAP.items() if k in available_cols})
+
+    # Deduplicate on the composite PK to avoid IntegrityError on insert.
+    logs = logs.drop_duplicates(subset=["player_id", "game_id"])
 
     # --- DNP / inactive edge-case handling ---
     for col in _INT_STAT_COLS:

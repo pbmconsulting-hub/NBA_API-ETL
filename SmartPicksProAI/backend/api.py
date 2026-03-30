@@ -122,6 +122,7 @@ def get_player_last5(player_id: int) -> dict:
                 g.season,
                 g.home_abbrev,
                 g.away_abbrev,
+                g.matchup,
                 l.game_id,
                 l.min,
                 l.pts, l.reb, l.ast, l.blk, l.stl, l.tov,
@@ -199,7 +200,8 @@ def get_games_today() -> dict:
     conn = _get_conn()
     try:
         rows = conn.execute(
-            "SELECT game_id, game_date, season, home_abbrev, away_abbrev, matchup FROM Games WHERE game_date = ?",
+            "SELECT game_id, game_date, season, home_team_id, away_team_id, "
+            "home_abbrev, away_abbrev, matchup FROM Games WHERE game_date = ?",
             (today,),
         ).fetchall()
     except Exception as exc:
@@ -231,10 +233,24 @@ def get_games_today() -> dict:
             if len(teams) >= 2:
                 away_tri = teams.iloc[0].get("teamTricode", "")
                 home_tri = teams.iloc[1].get("teamTricode", "")
-                matchup = f"{away_tri} @ {home_tri}"
+                away_team_id = int(teams.iloc[0].get("teamId", 0)) or None
+                home_team_id = int(teams.iloc[1].get("teamId", 0)) or None
+                matchup = f"{home_tri} vs. {away_tri}"
             else:
+                away_tri = ""
+                home_tri = ""
+                away_team_id = None
+                home_team_id = None
                 matchup = game_row.get("gameCode", "TBD")
-            live_games.append({"game_id": game_id, "matchup": matchup})
+            live_games.append({
+                "game_id": game_id,
+                "game_date": today,
+                "home_team_id": home_team_id,
+                "away_team_id": away_team_id,
+                "home_abbrev": home_tri,
+                "away_abbrev": away_tri,
+                "matchup": matchup,
+            })
         logger.info("ScoreboardV3 returned %d games.", len(live_games))
         return {"date": today, "source": "live", "games": live_games}
     except Exception as exc:

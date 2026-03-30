@@ -265,9 +265,9 @@ if selected_player_id and st.button("Load Player Card"):
             display_cols = [
                 c
                 for c in [
-                    "game_date", "pts", "reb", "ast", "blk", "stl", "tov",
-                    "fgm", "fga", "fg_pct", "fg3m", "fg3a", "fg3_pct",
-                    "ftm", "fta", "ft_pct", "oreb", "dreb", "pf",
+                    "game_date", "matchup", "pts", "reb", "ast", "blk",
+                    "stl", "tov", "fgm", "fga", "fg_pct", "fg3m", "fg3a",
+                    "fg3_pct", "ftm", "fta", "ft_pct", "oreb", "dreb", "pf",
                     "plus_minus", "min",
                 ]
                 if c in df.columns
