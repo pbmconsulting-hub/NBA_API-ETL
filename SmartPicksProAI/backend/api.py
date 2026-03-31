@@ -489,6 +489,66 @@ def get_team_stats(team_id: int, last_n: int = 10) -> dict:
         conn.close()
 
 
+@app.get("/api/defense-vs-position/{team_abbreviation}")
+def get_defense_vs_position(team_abbreviation: str) -> dict:
+    """Return Defense_Vs_Position multipliers for a specific team.
+
+    Each multiplier indicates how players at a given position perform against
+    this team relative to the league average.  A multiplier **> 1.0** means
+    the team allows more than average (weaker defense); **< 1.0** means
+    tougher defense.
+
+    Args:
+        team_abbreviation: Three-letter team code (e.g. ``'BOS'``).
+
+    Returns:
+        JSON with ``team_abbreviation`` and a ``positions`` list::
+
+            {
+              "team_abbreviation": "BOS",
+              "positions": [
+                {
+                  "pos": "G",
+                  "vs_pts_mult": 0.95,
+                  "vs_reb_mult": 1.02,
+                  "vs_ast_mult": 0.98,
+                  "vs_stl_mult": 1.01,
+                  "vs_blk_mult": 0.90,
+                  "vs_3pm_mult": 0.93
+                }
+              ]
+            }
+
+    Raises:
+        HTTPException 500: On unexpected database errors.
+    """
+    abbrev = team_abbreviation.upper()
+    logger.info("GET /api/defense-vs-position/%s", abbrev)
+    conn = _get_conn()
+    try:
+        rows = conn.execute(
+            """
+            SELECT pos, vs_pts_mult, vs_reb_mult, vs_ast_mult,
+                   vs_stl_mult, vs_blk_mult, vs_3pm_mult
+            FROM Defense_Vs_Position
+            WHERE team_abbreviation = ?
+            ORDER BY pos
+            """,
+            (abbrev,),
+        ).fetchall()
+        return {
+            "team_abbreviation": abbrev,
+            "positions": [dict(r) for r in rows],
+        }
+    except Exception as exc:
+        logger.exception(
+            "Error fetching defense-vs-position for %s.", abbrev
+        )
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    finally:
+        conn.close()
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------

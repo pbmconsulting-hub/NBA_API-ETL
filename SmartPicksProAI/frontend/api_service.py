@@ -18,6 +18,8 @@ Usage::
         search_players,
         get_teams,
         get_team_roster,
+        get_team_stats,
+        get_defense_vs_position,
         trigger_refresh,
     )
 """
@@ -188,6 +190,35 @@ def get_team_stats(team_id: int, last_n: int = 10) -> list[dict]:
         return resp.json().get("games", [])
     except Exception as exc:
         logger.error("Failed to fetch stats for team %d: %s", team_id, exc)
+        return []
+
+
+@st.cache_data(ttl=3600)
+def get_defense_vs_position(team_abbreviation: str) -> list[dict]:
+    """Fetch defense-vs-position multipliers for a specific team.
+
+    Calls ``GET /api/defense-vs-position/{team_abbreviation}`` and returns
+    the ``positions`` list.  Cached for 1 hour.
+
+    Args:
+        team_abbreviation: Three-letter team code (e.g. ``'BOS'``).
+
+    Returns:
+        A list of position multiplier dicts, or an empty list on error.
+    """
+    try:
+        resp = requests.get(
+            f"{BASE_URL}/api/defense-vs-position/{team_abbreviation}",
+            timeout=15,
+        )
+        resp.raise_for_status()
+        return resp.json().get("positions", [])
+    except Exception as exc:
+        logger.error(
+            "Failed to fetch defense-vs-position for %s: %s",
+            team_abbreviation,
+            exc,
+        )
         return []
 
 

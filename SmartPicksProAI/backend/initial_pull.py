@@ -722,6 +722,113 @@ def update_team_season_stats(conn: sqlite3.Connection) -> None:
         logger.info("Teams: no Team_Game_Stats data to aggregate.")
 
 
+def populate_defense_vs_position(
+    conn: sqlite3.Connection, season: str = SEASON
+) -> None:
+    """Compute and store Defense_Vs_Position multipliers from game-log data.
+
+    For each opponent team and player position, this function calculates how
+    players at that position perform **against** that team compared to the
+    league-wide average for the same position.
+
+    A multiplier **> 1.0** means the team allows *more* than average for that
+    stat/position combo (i.e. weaker defense).  A multiplier **< 1.0** means
+    the team is *tougher* than average.
+
+    Positions are normalised to a single character (``G``, ``F``, or ``C``)
+    using the first character of ``Players.position``.
+
+    The opponent for each player-game is inferred from ``Players.team_id``
+    compared to ``Games.home_team_id`` / ``away_team_id``.  This is an
+    approximation for mid-season trades but is accurate for the vast majority
+    of player-games.
+
+    The table is fully refreshed (``DELETE`` + ``INSERT``) for the given
+    *season* on each call.
+
+    Args:
+        conn: Open SQLite connection.
+        season: NBA season string, e.g. ``'2025-26'``.
+    """
+    query = """
+        SELECT
+            l.pts, l.reb, l.ast, l.stl, l.blk, l.fg3m,
+            SUBSTR(p.position, 1, 1) AS pos,
+            CASE
+                WHEN p.team_id = g.home_team_id THEN t_away.abbreviation
+                WHEN p.team_id = g.away_team_id THEN t_home.abbreviation
+            END AS opp_abbrev
+        FROM Player_Game_Logs l
+        JOIN Players p ON p.player_id = l.player_id
+        JOIN Games g ON g.game_id = l.game_id
+        LEFT JOIN Teams t_home ON t_home.team_id = g.home_team_id
+        LEFT JOIN Teams t_away ON t_away.team_id = g.away_team_id
+        WHERE p.position IS NOT NULL
+          AND p.position != ''
+          AND g.home_team_id IS NOT NULL
+          AND g.away_team_id IS NOT NULL
+    """
+    df = pd.read_sql(query, conn)
+    if df.empty:
+        logger.info("Defense_Vs_Position: no data available to compute.")
+        return
+
+    # Drop rows where the opponent could not be determined.
+    df = df.dropna(subset=["opp_abbrev"])
+    if df.empty:
+        logger.info("Defense_Vs_Position: no opponent-matchable data.")
+        return
+
+    stat_cols = ["pts", "reb", "ast", "stl", "blk", "fg3m"]
+
+    # League-wide averages by position.
+    league_avg = df.groupby("pos")[stat_cols].mean()
+
+    # Per-opponent-team per-position averages.
+    team_avg = df.groupby(["opp_abbrev", "pos"])[stat_cols].mean()
+
+    # Compute multipliers: team_avg / league_avg for each stat.
+    stat_to_mult = {
+        "pts": "vs_pts_mult",
+        "reb": "vs_reb_mult",
+        "ast": "vs_ast_mult",
+        "stl": "vs_stl_mult",
+        "blk": "vs_blk_mult",
+        "fg3m": "vs_3pm_mult",
+    }
+
+    rows: list[dict] = []
+    for (opp, pos), t_row in team_avg.iterrows():
+        if pos not in league_avg.index:
+            continue
+        l_row = league_avg.loc[pos]
+        row: dict = {
+            "team_abbreviation": opp,
+            "season": season,
+            "pos": pos,
+        }
+        for stat, mult_col in stat_to_mult.items():
+            league_val = l_row[stat]
+            if league_val and league_val > 0:
+                row[mult_col] = round(float(t_row[stat]) / float(league_val), 3)
+            else:
+                row[mult_col] = 1.0
+        rows.append(row)
+
+    if not rows:
+        logger.info("Defense_Vs_Position: no multipliers computed.")
+        return
+
+    result = pd.DataFrame(rows)
+
+    # Full refresh for the given season.
+    conn.execute(
+        "DELETE FROM Defense_Vs_Position WHERE season = ?", (season,)
+    )
+    result.to_sql("Defense_Vs_Position", conn, if_exists="append", index=False)
+    logger.info("Defense_Vs_Position: inserted %d rows for season %s.", len(result), season)
+
+
 # ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
@@ -737,6 +844,7 @@ def run_initial_pull(db_path: str = DB_PATH, season: str = SEASON) -> None:
     5. Fetches team-level game logs and populates Team_Game_Stats.
     6. Fetches rosters for every team and populates Team_Roster and
        Players.position.
+    7. Computes Defense_Vs_Position multipliers from the loaded data.
 
     Args:
         db_path: Path to the SQLite database file.
@@ -779,6 +887,11 @@ def run_initial_pull(db_path: str = DB_PATH, season: str = SEASON) -> None:
 
         # --- Rosters (rate-limited: 1 req / team) ---
         fetch_and_load_rosters(conn, season)
+        conn.commit()
+
+        # --- Defense vs Position multipliers ---
+        # Must run after rosters are loaded (Players.position is needed).
+        populate_defense_vs_position(conn, season)
         conn.commit()
 
         logger.info("=== Initial pull complete. Database is ready. ===")

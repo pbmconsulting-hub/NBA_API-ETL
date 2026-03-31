@@ -432,6 +432,9 @@ def run_update(db_path: str = DB_PATH) -> int:
         # Refresh season-level pace/ortg/drtg on the Teams table.
         initial_pull.update_team_season_stats(conn)
 
+        # Refresh Defense_Vs_Position multipliers.
+        initial_pull.populate_defense_vs_position(conn, SEASON)
+
         conn.commit()
         logger.info(
             "=== Update complete. %d new log records added. ===", new_log_count
