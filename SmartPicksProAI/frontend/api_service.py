@@ -164,6 +164,33 @@ def get_team_roster(team_id: int) -> list[dict]:
         return []
 
 
+@st.cache_data(ttl=3600)
+def get_team_stats(team_id: int, last_n: int = 10) -> list[dict]:
+    """Fetch a team's recent game-level stats from the backend.
+
+    Calls ``GET /api/teams/{team_id}/stats?last_n=<last_n>`` and returns
+    the ``games`` list.  Cached for 1 hour.
+
+    Args:
+        team_id: The NBA team ID.
+        last_n:  Number of recent games to return (default 10).
+
+    Returns:
+        A list of game stat dicts, or an empty list on error.
+    """
+    try:
+        resp = requests.get(
+            f"{BASE_URL}/api/teams/{team_id}/stats",
+            params={"last_n": last_n},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        return resp.json().get("games", [])
+    except Exception as exc:
+        logger.error("Failed to fetch stats for team %d: %s", team_id, exc)
+        return []
+
+
 # ---------------------------------------------------------------------------
 # POST endpoints (never cached — always live)
 # ---------------------------------------------------------------------------

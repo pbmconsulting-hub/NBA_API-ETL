@@ -363,7 +363,8 @@ def get_teams() -> dict:
     conn = _get_conn()
     try:
         rows = conn.execute(
-            "SELECT team_id, abbreviation, team_name, conference, division "
+            "SELECT team_id, abbreviation, team_name, conference, division, "
+            "pace, ortg, drtg "
             "FROM Teams ORDER BY abbreviation"
         ).fetchall()
         return {"teams": [dict(r) for r in rows]}
@@ -423,6 +424,66 @@ def get_team_roster(team_id: int) -> dict:
         return {"team_id": team_id, "players": [dict(r) for r in rows]}
     except Exception as exc:
         logger.exception("Error fetching roster for team %d.", team_id)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    finally:
+        conn.close()
+
+
+@app.get("/api/teams/{team_id}/stats")
+def get_team_stats(team_id: int, last_n: int = 10) -> dict:
+    """Return recent game-level stats for a specific team.
+
+    Queries ``Team_Game_Stats`` for the most recent *last_n* games played
+    by the team, ordered by ``game_date DESC``.
+
+    Args:
+        team_id: The NBA team ID.
+        last_n:  Number of recent games to return (default 10, max 82).
+
+    Returns:
+        JSON with ``team_id`` and a ``games`` list of per-game stat dicts::
+
+            {
+              "team_id": 1610612747,
+              "games": [
+                {
+                  "game_id": "0022501100",
+                  "game_date": "2026-03-28",
+                  "opponent_team_id": 1610612738,
+                  "is_home": 1,
+                  "points_scored": 112,
+                  "points_allowed": 105,
+                  "pace_est": 99.2,
+                  "ortg_est": 113.5,
+                  "drtg_est": 106.4
+                }
+              ]
+            }
+
+    Raises:
+        HTTPException 500: On unexpected database errors.
+    """
+    logger.info("GET /api/teams/%d/stats?last_n=%d", team_id, last_n)
+    last_n = max(1, min(last_n, 82))
+    conn = _get_conn()
+    try:
+        rows = conn.execute(
+            """
+            SELECT tgs.game_id, g.game_date, g.matchup,
+                   tgs.opponent_team_id, tgs.is_home,
+                   tgs.points_scored, tgs.points_allowed,
+                   tgs.pace_est, tgs.ortg_est, tgs.drtg_est
+            FROM Team_Game_Stats tgs
+            JOIN Games g ON g.game_id = tgs.game_id
+            WHERE tgs.team_id = ?
+            ORDER BY g.game_date DESC
+            LIMIT ?
+            """,
+            (team_id, last_n),
+        ).fetchall()
+        return {"team_id": team_id, "games": [dict(r) for r in rows]}
+    except Exception as exc:
+        logger.exception("Error fetching stats for team %d.", team_id)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     finally:
         conn.close()

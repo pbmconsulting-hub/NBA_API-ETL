@@ -679,6 +679,49 @@ def fetch_and_load_rosters(
         logger.info("Players.position: updated %d rows.", len(position_updates))
 
 
+def update_team_season_stats(conn: sqlite3.Connection) -> None:
+    """Refresh the Teams table ``pace``, ``ortg``, and ``drtg`` columns.
+
+    Computes season-level averages from per-game estimates stored in
+    ``Team_Game_Stats`` and writes them back into the ``Teams`` table so that
+    the ``/api/teams`` endpoint can serve them directly.
+
+    Args:
+        conn: Open SQLite connection.
+    """
+    updated = conn.execute(
+        """
+        UPDATE Teams SET
+            pace = (
+                SELECT ROUND(AVG(tgs.pace_est), 1)
+                FROM Team_Game_Stats tgs
+                WHERE tgs.team_id = Teams.team_id
+                  AND tgs.pace_est IS NOT NULL
+            ),
+            ortg = (
+                SELECT ROUND(AVG(tgs.ortg_est), 1)
+                FROM Team_Game_Stats tgs
+                WHERE tgs.team_id = Teams.team_id
+                  AND tgs.ortg_est IS NOT NULL
+            ),
+            drtg = (
+                SELECT ROUND(AVG(tgs.drtg_est), 1)
+                FROM Team_Game_Stats tgs
+                WHERE tgs.team_id = Teams.team_id
+                  AND tgs.drtg_est IS NOT NULL
+            )
+        WHERE EXISTS (
+            SELECT 1 FROM Team_Game_Stats tgs
+            WHERE tgs.team_id = Teams.team_id
+        )
+        """
+    ).rowcount
+    if updated:
+        logger.info("Teams: refreshed pace/ortg/drtg for %d teams.", updated)
+    else:
+        logger.info("Teams: no Team_Game_Stats data to aggregate.")
+
+
 # ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
@@ -729,6 +772,9 @@ def run_initial_pull(db_path: str = DB_PATH, season: str = SEASON) -> None:
 
         # Back-fill home/away scores from Team_Game_Stats into Games.
         populate_game_scores(conn)
+
+        # Refresh season-level pace/ortg/drtg on the Teams table.
+        update_team_season_stats(conn)
         conn.commit()
 
         # --- Rosters (rate-limited: 1 req / team) ---

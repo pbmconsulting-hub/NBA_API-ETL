@@ -429,6 +429,9 @@ def run_update(db_path: str = DB_PATH) -> int:
         # Back-fill home/away scores from Team_Game_Stats into Games.
         initial_pull.populate_game_scores(conn)
 
+        # Refresh season-level pace/ortg/drtg on the Teams table.
+        initial_pull.update_team_season_stats(conn)
+
         conn.commit()
         logger.info(
             "=== Update complete. %d new log records added. ===", new_log_count

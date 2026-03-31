@@ -21,6 +21,7 @@ from typing import Optional
 from api_service import (
     get_player_last5,
     get_team_roster,
+    get_team_stats,
     get_teams,
     get_todays_games,
     search_players,
@@ -107,6 +108,7 @@ with st.sidebar:
             search_players.clear()
             get_teams.clear()
             get_team_roster.clear()
+            get_team_stats.clear()
         else:
             st.error(f"Refresh failed: {result.get('message', 'Unknown error')}")
 

@@ -168,13 +168,23 @@ are found, fetches live data via `ScoreboardV3`.
 
 ### `GET /api/teams`
 
-Lists all 30 NBA teams stored in the database.
+Lists all 30 NBA teams stored in the database, including season-level
+pace, offensive rating, and defensive rating computed from Team_Game_Stats.
 
 **Response:**
 ```json
 {
   "teams": [
-    {"team_id": 1610612737, "abbreviation": "ATL", "team_name": "Atlanta Hawks"}
+    {
+      "team_id": 1610612737,
+      "abbreviation": "ATL",
+      "team_name": "Atlanta Hawks",
+      "conference": "East",
+      "division": "Southeast",
+      "pace": 99.8,
+      "ortg": 112.3,
+      "drtg": 114.1
+    }
   ]
 }
 ```
@@ -200,10 +210,37 @@ Returns the roster for a specific team.
 }
 ```
 
+### `GET /api/teams/{team_id}/stats?last_n=10`
+
+Returns recent game-level stats for a specific team (default last 10 games,
+max 82).
+
+**Response:**
+```json
+{
+  "team_id": 1610612747,
+  "games": [
+    {
+      "game_id": "0022501100",
+      "game_date": "2026-03-28",
+      "matchup": "LAL vs. BOS",
+      "opponent_team_id": 1610612738,
+      "is_home": 1,
+      "points_scored": 112,
+      "points_allowed": 105,
+      "pace_est": 99.2,
+      "ortg_est": 113.5,
+      "drtg_est": 106.4
+    }
+  ]
+}
+```
+
 ### `POST /api/admin/refresh-data`
 
 Triggers an on-demand incremental data update.  Fetches all player and team
 game logs between the last stored date and yesterday, then appends new rows.
+Also refreshes season-level team pace/ortg/drtg.
 
 **Response:**
 ```json
@@ -234,8 +271,9 @@ game logs between the last stored date and yesterday, then appends new rows.
 | File | Purpose |
 |---|---|
 | `backend/setup_db.py` | Creates `smartpicks.db` and all eight tables with `IF NOT EXISTS` guards and `ALTER TABLE` migration support. |
-| `backend/initial_pull.py` | One-time seed script — seeds Teams from `nba_api` static data, pulls the full 2025-26 season via `LeagueGameLog` (player + team level), fetches rosters via `CommonTeamRoster`, and loads all core tables including Team_Game_Stats and Team_Roster. |
-| `backend/data_updater.py` | Exposes `run_update()` — finds the latest date in the DB, fetches only new player and team game logs, handles DNP/null stats, updates Team_Game_Stats, and appends them. No scheduling loops. |
+| `backend/initial_pull.py` | One-time seed script — seeds Teams (with conference/division) from `nba_api` static data, pulls the full 2025-26 season via `LeagueGameLog` (player + team level), computes pace/ortg/drtg estimates, fetches rosters via `CommonTeamRoster`, and loads all core tables including Team_Game_Stats and Team_Roster. |
+| `backend/data_updater.py` | Exposes `run_update()` — finds the latest date in the DB, fetches only new player and team game logs, handles DNP/null stats, updates Team_Game_Stats, refreshes season-level team ratings, and appends them. No scheduling loops. |
+| `backend/api.py` | FastAPI app with seven endpoints: last-5 stats, player search, today's games, team list (with pace/ortg/drtg), team roster, team game stats, and manual refresh trigger. |
 | `backend/api.py` | FastAPI app with six endpoints: last-5 stats, player search, today's games, team list, team roster, and manual refresh trigger. |
 | `frontend/api_service.py` | HTTP client using `requests` with `@st.cache_data` caching and error handling for all six endpoints. |
 | `frontend/app.py` | Streamlit dashboard with dark FinTech theme, matchup grid, player name search, team browser, and admin controls. |
