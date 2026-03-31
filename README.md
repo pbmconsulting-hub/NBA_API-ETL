@@ -274,8 +274,7 @@ Also refreshes season-level team pace/ortg/drtg.
 | `backend/initial_pull.py` | One-time seed script — seeds Teams (with conference/division) from `nba_api` static data, pulls the full 2025-26 season via `LeagueGameLog` (player + team level), computes pace/ortg/drtg estimates, fetches rosters via `CommonTeamRoster`, and loads all core tables including Team_Game_Stats and Team_Roster. |
 | `backend/data_updater.py` | Exposes `run_update()` — finds the latest date in the DB, fetches only new player and team game logs, handles DNP/null stats, updates Team_Game_Stats, refreshes season-level team ratings, and appends them. No scheduling loops. |
 | `backend/api.py` | FastAPI app with seven endpoints: last-5 stats, player search, today's games, team list (with pace/ortg/drtg), team roster, team game stats, and manual refresh trigger. |
-| `backend/api.py` | FastAPI app with six endpoints: last-5 stats, player search, today's games, team list, team roster, and manual refresh trigger. |
-| `frontend/api_service.py` | HTTP client using `requests` with `@st.cache_data` caching and error handling for all six endpoints. |
+| `frontend/api_service.py` | HTTP client using `requests` with `@st.cache_data` caching and error handling for all seven endpoints. |
 | `frontend/app.py` | Streamlit dashboard with dark FinTech theme, matchup grid, player name search, team browser, and admin controls. |
 
 ---
