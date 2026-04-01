@@ -15,7 +15,7 @@ Start the server::
 Endpoints
 ---------
 GET  /api/players/{player_id}/last5   – Last 5 game logs with computed averages.
-GET  /api/games/today                 – Today's NBA matchups (DB first, then live).
+GET  /api/games/today                 – Today's NBA matchups (database only).
 POST /api/admin/refresh-data          – Trigger an incremental data update.
 """
 
@@ -25,7 +25,6 @@ from datetime import date
 
 import uvicorn
 from fastapi import FastAPI, HTTPException
-from nba_api.stats.endpoints import ScoreboardV3
 
 import data_updater
 import setup_db
@@ -177,17 +176,18 @@ def get_player_last5(player_id: int) -> dict:
 
 @app.get("/api/games/today")
 def get_games_today() -> dict:
-    """Return today's NBA matchups.
+    """Return today's NBA matchups from the database.
 
-    Checks the Games table first.  If no games are found for today's date,
-    falls back to a live query via the ``ScoreboardV3`` endpoint.
+    Queries the Games table for today's date.  Today's schedule is populated
+    by :func:`data_updater.sync_todays_games` (called during each data
+    refresh) so this endpoint never needs to reach the live NBA API.
 
     Returns:
         JSON with a list of today's games::
 
             {
               "date": "2026-03-30",
-              "source": "database",   // or "live"
+              "source": "database",
               "games": [
                 {"game_id": "...", "matchup": "LAL vs. BOS"},
                 ...
@@ -214,54 +214,12 @@ def get_games_today() -> dict:
     finally:
         conn.close()
 
-    if rows:
-        logger.info("Found %d games in DB for %s.", len(rows), today)
-        return {
-            "date": today,
-            "source": "database",
-            "games": [dict(row) for row in rows],
-        }
-
-    # Fall back to the live ScoreboardV3 endpoint.
-    logger.info("No games in DB for %s — fetching live data via ScoreboardV3.", today)
-    try:
-        scoreboard = ScoreboardV3(game_date=today)
-        game_header = scoreboard.game_header.get_data_frame()
-        line_score = scoreboard.line_score.get_data_frame()
-
-        live_games = []
-        for _, game_row in game_header.iterrows():
-            game_id = str(game_row.get("gameId", ""))
-            # LineScore has 2 rows per game: away team first, home team second.
-            teams = line_score[line_score["gameId"].astype(str) == game_id]
-            if len(teams) >= 2:
-                away_tri = teams.iloc[0].get("teamTricode", "")
-                home_tri = teams.iloc[1].get("teamTricode", "")
-                raw_away = teams.iloc[0].get("teamId")
-                raw_home = teams.iloc[1].get("teamId")
-                away_team_id = int(raw_away) if raw_away is not None else None
-                home_team_id = int(raw_home) if raw_home is not None else None
-                matchup = f"{home_tri} vs. {away_tri}"
-            else:
-                away_tri = ""
-                home_tri = ""
-                away_team_id = None
-                home_team_id = None
-                matchup = game_row.get("gameCode", "TBD")
-            live_games.append({
-                "game_id": game_id,
-                "game_date": today,
-                "home_team_id": home_team_id,
-                "away_team_id": away_team_id,
-                "home_abbrev": home_tri,
-                "away_abbrev": away_tri,
-                "matchup": matchup,
-            })
-        logger.info("ScoreboardV3 returned %d games.", len(live_games))
-        return {"date": today, "source": "live", "games": live_games}
-    except Exception as exc:
-        logger.exception("Error fetching live scoreboard for %s.", today)
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    logger.info("Found %d games in DB for %s.", len(rows), today)
+    return {
+        "date": today,
+        "source": "database",
+        "games": [dict(row) for row in rows],
+    }
 
 
 @app.post("/api/admin/refresh-data")
