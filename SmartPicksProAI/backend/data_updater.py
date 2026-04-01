@@ -22,7 +22,7 @@ from datetime import date, datetime, timedelta
 from typing import Optional
 
 import pandas as pd
-from nba_api.stats.endpoints import LeagueGameLog
+from nba_api.stats.endpoints import LeagueGameLog, ScoreboardV3
 
 import initial_pull
 import setup_db
@@ -358,6 +358,87 @@ def _upsert_team_game_stats(
 
 
 # ---------------------------------------------------------------------------
+# Today's schedule helper
+# ---------------------------------------------------------------------------
+
+
+def sync_todays_games(conn: sqlite3.Connection) -> int:
+    """Fetch today's scheduled games via ``ScoreboardV3`` and insert them.
+
+    Only games whose ``game_id`` is not already in the ``Games`` table are
+    inserted.  This ensures that ``GET /api/games/today`` can be answered
+    entirely from the database without a live API fallback.
+
+    Args:
+        conn: Open SQLite connection (caller is responsible for committing).
+
+    Returns:
+        Number of new game rows inserted into the ``Games`` table.
+    """
+    today_str = date.today().isoformat()
+    logger.info("Syncing today's schedule (%s) via ScoreboardV3 …", today_str)
+
+    try:
+        scoreboard = ScoreboardV3(game_date=today_str)
+        time.sleep(2)  # Respect NBA API rate limits.
+        game_header = scoreboard.game_header.get_data_frame()
+        line_score = scoreboard.line_score.get_data_frame()
+    except Exception:
+        logger.exception("Failed to fetch ScoreboardV3 for %s.", today_str)
+        return 0
+
+    if game_header.empty:
+        logger.info("ScoreboardV3 returned no games for %s.", today_str)
+        return 0
+
+    # Pre-convert gameId column to string once to avoid repeated conversions.
+    line_score_game_ids = line_score["gameId"].astype(str)
+
+    inserted = 0
+    cursor = conn.cursor()
+    for _, game_row in game_header.iterrows():
+        game_id = str(game_row.get("gameId", ""))
+        if not game_id:
+            continue
+
+        # Skip if already stored.
+        existing = cursor.execute(
+            "SELECT 1 FROM Games WHERE game_id = ?", (game_id,)
+        ).fetchone()
+        if existing:
+            continue
+
+        # LineScore has 2 rows per game: away team first, home team second.
+        teams = line_score[line_score_game_ids == game_id]
+        if len(teams) >= 2:
+            away_tri = teams.iloc[0].get("teamTricode", "")
+            home_tri = teams.iloc[1].get("teamTricode", "")
+            raw_away = teams.iloc[0].get("teamId")
+            raw_home = teams.iloc[1].get("teamId")
+            away_team_id = int(raw_away) if raw_away is not None else None
+            home_team_id = int(raw_home) if raw_home is not None else None
+            matchup = f"{home_tri} vs. {away_tri}"
+        else:
+            away_tri = ""
+            home_tri = ""
+            away_team_id = None
+            home_team_id = None
+            matchup = game_row.get("gameCode", "TBD")
+
+        cursor.execute(
+            "INSERT INTO Games (game_id, game_date, season, home_team_id, "
+            "away_team_id, home_abbrev, away_abbrev, matchup) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (game_id, today_str, SEASON, home_team_id, away_team_id,
+             home_tri, away_tri, matchup),
+        )
+        inserted += 1
+
+    logger.info("Today's schedule: inserted %d new games for %s.", inserted, today_str)
+    return inserted
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -406,6 +487,9 @@ def run_update(db_path: str = DB_PATH) -> int:
             logger.info(
                 "Database is already up to date (last game date: %s).", last_date
             )
+            # Still sync today's schedule so the games/today endpoint works.
+            sync_todays_games(conn)
+            conn.commit()
             return 0
 
         logger.info(
@@ -416,6 +500,9 @@ def run_update(db_path: str = DB_PATH) -> int:
 
         if raw.empty:
             logger.info("No new game data found for the requested date range.")
+            # Still sync today's schedule so the games/today endpoint works.
+            sync_todays_games(conn)
+            conn.commit()
             return 0
 
         _upsert_players(raw, conn)
@@ -434,6 +521,10 @@ def run_update(db_path: str = DB_PATH) -> int:
 
         # Refresh Defense_Vs_Position multipliers.
         initial_pull.populate_defense_vs_position(conn, SEASON)
+
+        # Pre-populate today's scheduled games so GET /api/games/today
+        # can be served entirely from the database.
+        sync_todays_games(conn)
 
         conn.commit()
         logger.info(
