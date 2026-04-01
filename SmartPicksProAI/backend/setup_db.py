@@ -922,7 +922,7 @@ CREATE TABLE IF NOT EXISTS Synergy_Play_Types (
     ft_poss_pct        REAL,
     tov_poss_pct       REAL,
     sf_poss_pct        REAL,
-    plusone_poss_pct    REAL,
+    plus_one_poss_pct  REAL,
     score_poss_pct     REAL,
     efg_pct            REAL,
     poss               INTEGER,
@@ -1200,7 +1200,7 @@ _VIEWS = {
         JOIN Teams t ON ldts.team_id = t.team_id
         LEFT JOIN Team_Estimated_Metrics tem
             ON ldts.season = tem.season AND ldts.team_id = tem.team_id
-        LEFT JOIN Standings s ON ldts.team_id = s.team_id
+        LEFT JOIN Standings s ON ldts.season = s.season_id AND ldts.team_id = s.team_id
     """,
     "v_upcoming_matchups": """
         CREATE VIEW IF NOT EXISTS v_upcoming_matchups AS
