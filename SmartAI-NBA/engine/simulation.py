@@ -2081,8 +2081,8 @@ def enrich_simulation_with_advanced_stats(
         return _default
 
     try:
-        from data.nba_stats_service import get_advanced_box_score
-        box = get_advanced_box_score(game_id)
+        from data.nba_data_service import get_box_score_advanced
+        box = get_box_score_advanced(game_id)
     except Exception as exc:
         _logger.debug("enrich_simulation_with_advanced_stats: service unavailable: %s", exc)
         return _default

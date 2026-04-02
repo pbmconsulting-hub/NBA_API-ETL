@@ -1125,3 +1125,639 @@ def get_recent_games(limit: int = 20) -> list[dict]:
         return []
     finally:
         conn.close()
+
+
+# ═══════════════════════════════════════════════════════════════
+# Per-game box score tables
+# ═══════════════════════════════════════════════════════════════
+
+
+def get_box_score_scoring(game_id: str) -> list[dict]:
+    """Return scoring breakdown box score rows for *game_id*."""
+    conn = _get_conn()
+    if conn is None:
+        return []
+    try:
+        rows = conn.execute(
+            "SELECT * FROM Box_Score_Scoring WHERE game_id = ?", (game_id,)
+        ).fetchall()
+        return _rows_to_dicts(rows)
+    except Exception as exc:
+        _logger.warning("get_box_score_scoring(%r) failed: %s", game_id, exc)
+        return []
+    finally:
+        conn.close()
+
+
+def get_box_score_misc(game_id: str) -> list[dict]:
+    """Return miscellaneous box score rows for *game_id*."""
+    conn = _get_conn()
+    if conn is None:
+        return []
+    try:
+        rows = conn.execute(
+            "SELECT * FROM Box_Score_Misc WHERE game_id = ?", (game_id,)
+        ).fetchall()
+        return _rows_to_dicts(rows)
+    except Exception as exc:
+        _logger.warning("get_box_score_misc(%r) failed: %s", game_id, exc)
+        return []
+    finally:
+        conn.close()
+
+
+def get_box_score_hustle(game_id: str) -> list[dict]:
+    """Return hustle box score rows for *game_id*."""
+    conn = _get_conn()
+    if conn is None:
+        return []
+    try:
+        rows = conn.execute(
+            "SELECT * FROM Box_Score_Hustle WHERE game_id = ?", (game_id,)
+        ).fetchall()
+        return _rows_to_dicts(rows)
+    except Exception as exc:
+        _logger.warning("get_box_score_hustle(%r) failed: %s", game_id, exc)
+        return []
+    finally:
+        conn.close()
+
+
+def get_box_score_four_factors(game_id: str) -> list[dict]:
+    """Return four-factors box score rows for *game_id*."""
+    conn = _get_conn()
+    if conn is None:
+        return []
+    try:
+        rows = conn.execute(
+            "SELECT * FROM Box_Score_Four_Factors WHERE game_id = ?", (game_id,)
+        ).fetchall()
+        return _rows_to_dicts(rows)
+    except Exception as exc:
+        _logger.warning("get_box_score_four_factors(%r) failed: %s", game_id, exc)
+        return []
+    finally:
+        conn.close()
+
+
+def get_box_score_usage(game_id: str) -> list[dict]:
+    """Return usage box score rows for *game_id*."""
+    conn = _get_conn()
+    if conn is None:
+        return []
+    try:
+        rows = conn.execute(
+            "SELECT * FROM Box_Score_Usage WHERE game_id = ?", (game_id,)
+        ).fetchall()
+        return _rows_to_dicts(rows)
+    except Exception as exc:
+        _logger.warning("get_box_score_usage(%r) failed: %s", game_id, exc)
+        return []
+    finally:
+        conn.close()
+
+
+def get_box_score_matchups(game_id: str) -> list[dict]:
+    """Return defensive-matchup box score rows for *game_id*."""
+    conn = _get_conn()
+    if conn is None:
+        return []
+    try:
+        rows = conn.execute(
+            "SELECT * FROM Box_Score_Matchups WHERE game_id = ?", (game_id,)
+        ).fetchall()
+        return _rows_to_dicts(rows)
+    except Exception as exc:
+        _logger.warning("get_box_score_matchups(%r) failed: %s", game_id, exc)
+        return []
+    finally:
+        conn.close()
+
+
+# ═══════════════════════════════════════════════════════════════
+# Season-level dashboard tables
+# ═══════════════════════════════════════════════════════════════
+
+
+def get_league_dash_player_stats(season: str | None = None) -> list[dict]:
+    """Return season-level player dashboard stats."""
+    conn = _get_conn()
+    if conn is None:
+        return []
+    try:
+        if season:
+            rows = conn.execute(
+                "SELECT * FROM League_Dash_Player_Stats WHERE season = ? ORDER BY pts DESC",
+                (season,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM League_Dash_Player_Stats ORDER BY season DESC, pts DESC"
+            ).fetchall()
+        return _rows_to_dicts(rows)
+    except Exception as exc:
+        _logger.warning("get_league_dash_player_stats failed: %s", exc)
+        return []
+    finally:
+        conn.close()
+
+
+def get_league_dash_team_stats(season: str | None = None) -> list[dict]:
+    """Return season-level team dashboard stats."""
+    conn = _get_conn()
+    if conn is None:
+        return []
+    try:
+        if season:
+            rows = conn.execute(
+                "SELECT * FROM League_Dash_Team_Stats WHERE season = ? ORDER BY pts DESC",
+                (season,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM League_Dash_Team_Stats ORDER BY season DESC, pts DESC"
+            ).fetchall()
+        return _rows_to_dicts(rows)
+    except Exception as exc:
+        _logger.warning("get_league_dash_team_stats failed: %s", exc)
+        return []
+    finally:
+        conn.close()
+
+
+def get_player_estimated_metrics(season: str | None = None) -> list[dict]:
+    """Return player estimated advanced metrics from the DB."""
+    conn = _get_conn()
+    if conn is None:
+        return []
+    try:
+        if season:
+            rows = conn.execute(
+                "SELECT * FROM Player_Estimated_Metrics WHERE season = ?", (season,)
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM Player_Estimated_Metrics ORDER BY season DESC"
+            ).fetchall()
+        return _rows_to_dicts(rows)
+    except Exception as exc:
+        _logger.warning("get_player_estimated_metrics failed: %s", exc)
+        return []
+    finally:
+        conn.close()
+
+
+def get_team_estimated_metrics(season: str | None = None) -> list[dict]:
+    """Return team estimated advanced metrics from the DB."""
+    conn = _get_conn()
+    if conn is None:
+        return []
+    try:
+        if season:
+            rows = conn.execute(
+                "SELECT * FROM Team_Estimated_Metrics WHERE season = ?", (season,)
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM Team_Estimated_Metrics ORDER BY season DESC"
+            ).fetchall()
+        return _rows_to_dicts(rows)
+    except Exception as exc:
+        _logger.warning("get_team_estimated_metrics failed: %s", exc)
+        return []
+    finally:
+        conn.close()
+
+
+def get_player_clutch_stats(season: str | None = None) -> list[dict]:
+    """Return player clutch-time stats from the DB."""
+    conn = _get_conn()
+    if conn is None:
+        return []
+    try:
+        if season:
+            rows = conn.execute(
+                "SELECT * FROM Player_Clutch_Stats WHERE season = ? ORDER BY pts DESC",
+                (season,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM Player_Clutch_Stats ORDER BY season DESC, pts DESC"
+            ).fetchall()
+        return _rows_to_dicts(rows)
+    except Exception as exc:
+        _logger.warning("get_player_clutch_stats failed: %s", exc)
+        return []
+    finally:
+        conn.close()
+
+
+def get_team_clutch_stats(season: str | None = None) -> list[dict]:
+    """Return team clutch-time stats from the DB."""
+    conn = _get_conn()
+    if conn is None:
+        return []
+    try:
+        if season:
+            rows = conn.execute(
+                "SELECT * FROM Team_Clutch_Stats WHERE season = ?", (season,)
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM Team_Clutch_Stats ORDER BY season DESC"
+            ).fetchall()
+        return _rows_to_dicts(rows)
+    except Exception as exc:
+        _logger.warning("get_team_clutch_stats failed: %s", exc)
+        return []
+    finally:
+        conn.close()
+
+
+def get_player_hustle_stats(season: str | None = None) -> list[dict]:
+    """Return player hustle stats from the DB."""
+    conn = _get_conn()
+    if conn is None:
+        return []
+    try:
+        if season:
+            rows = conn.execute(
+                "SELECT * FROM Player_Hustle_Stats WHERE season = ?", (season,)
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM Player_Hustle_Stats ORDER BY season DESC"
+            ).fetchall()
+        return _rows_to_dicts(rows)
+    except Exception as exc:
+        _logger.warning("get_player_hustle_stats failed: %s", exc)
+        return []
+    finally:
+        conn.close()
+
+
+def get_team_hustle_stats(season: str | None = None) -> list[dict]:
+    """Return team hustle stats from the DB."""
+    conn = _get_conn()
+    if conn is None:
+        return []
+    try:
+        if season:
+            rows = conn.execute(
+                "SELECT * FROM Team_Hustle_Stats WHERE season = ?", (season,)
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM Team_Hustle_Stats ORDER BY season DESC"
+            ).fetchall()
+        return _rows_to_dicts(rows)
+    except Exception as exc:
+        _logger.warning("get_team_hustle_stats failed: %s", exc)
+        return []
+    finally:
+        conn.close()
+
+
+# ═══════════════════════════════════════════════════════════════
+# Context and historical tables
+# ═══════════════════════════════════════════════════════════════
+
+
+def get_game_rotation(game_id: str) -> list[dict]:
+    """Return rotation (sub-in/out) data for *game_id*."""
+    conn = _get_conn()
+    if conn is None:
+        return []
+    try:
+        rows = conn.execute(
+            "SELECT * FROM Game_Rotation WHERE game_id = ? ORDER BY in_time_real",
+            (game_id,),
+        ).fetchall()
+        return _rows_to_dicts(rows)
+    except Exception as exc:
+        _logger.warning("get_game_rotation(%r) failed: %s", game_id, exc)
+        return []
+    finally:
+        conn.close()
+
+
+def get_play_by_play(game_id: str) -> list[dict]:
+    """Return play-by-play events for *game_id*."""
+    conn = _get_conn()
+    if conn is None:
+        return []
+    try:
+        rows = conn.execute(
+            "SELECT * FROM Play_By_Play WHERE game_id = ? ORDER BY action_number",
+            (game_id,),
+        ).fetchall()
+        return _rows_to_dicts(rows)
+    except Exception as exc:
+        _logger.warning("get_play_by_play(%r) failed: %s", game_id, exc)
+        return []
+    finally:
+        conn.close()
+
+
+def get_win_probability(game_id: str) -> list[dict]:
+    """Return win probability play-by-play for *game_id*."""
+    conn = _get_conn()
+    if conn is None:
+        return []
+    try:
+        rows = conn.execute(
+            "SELECT * FROM Win_Probability_PBP WHERE game_id = ? ORDER BY event_num",
+            (game_id,),
+        ).fetchall()
+        return _rows_to_dicts(rows)
+    except Exception as exc:
+        _logger.warning("get_win_probability(%r) failed: %s", game_id, exc)
+        return []
+    finally:
+        conn.close()
+
+
+def get_shot_chart(player_id: int, season: str | None = None) -> list[dict]:
+    """Return shot chart detail for *player_id*."""
+    conn = _get_conn()
+    if conn is None:
+        return []
+    try:
+        if season:
+            rows = conn.execute(
+                "SELECT * FROM Shot_Chart WHERE player_id = ? AND season = ?",
+                (int(player_id), season),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM Shot_Chart WHERE player_id = ?", (int(player_id),)
+            ).fetchall()
+        return _rows_to_dicts(rows)
+    except Exception as exc:
+        _logger.warning("get_shot_chart(%s) failed: %s", player_id, exc)
+        return []
+    finally:
+        conn.close()
+
+
+def get_player_tracking_stats(game_id: str) -> list[dict]:
+    """Return player tracking stats for *game_id*."""
+    conn = _get_conn()
+    if conn is None:
+        return []
+    try:
+        rows = conn.execute(
+            "SELECT * FROM Player_Tracking_Stats WHERE game_id = ?", (game_id,)
+        ).fetchall()
+        return _rows_to_dicts(rows)
+    except Exception as exc:
+        _logger.warning("get_player_tracking_stats(%r) failed: %s", game_id, exc)
+        return []
+    finally:
+        conn.close()
+
+
+def get_draft_history(season: str | None = None) -> list[dict]:
+    """Return draft history, optionally filtered by season."""
+    conn = _get_conn()
+    if conn is None:
+        return []
+    try:
+        if season:
+            rows = conn.execute(
+                "SELECT * FROM Draft_History WHERE season = ? ORDER BY overall_pick",
+                (season,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM Draft_History ORDER BY season DESC, overall_pick"
+            ).fetchall()
+        return _rows_to_dicts(rows)
+    except Exception as exc:
+        _logger.warning("get_draft_history failed: %s", exc)
+        return []
+    finally:
+        conn.close()
+
+
+def get_synergy_play_types(team_id: int | None = None,
+                           season: str | None = None) -> list[dict]:
+    """Return Synergy play-type breakdown data."""
+    conn = _get_conn()
+    if conn is None:
+        return []
+    try:
+        conditions: list[str] = []
+        params: list = []
+        if team_id is not None:
+            conditions.append("team_id = ?")
+            params.append(int(team_id))
+        if season:
+            conditions.append("season_id = ?")
+            params.append(season)
+        where = " WHERE " + " AND ".join(conditions) if conditions else ""
+        rows = conn.execute(
+            f"SELECT * FROM Synergy_Play_Types{where} ORDER BY ppp DESC", params
+        ).fetchall()
+        return _rows_to_dicts(rows)
+    except Exception as exc:
+        _logger.warning("get_synergy_play_types failed: %s", exc)
+        return []
+    finally:
+        conn.close()
+
+
+def get_league_lineups(team_id: int | None = None,
+                       season: str | None = None) -> list[dict]:
+    """Return league lineup data, optionally filtered by team/season."""
+    conn = _get_conn()
+    if conn is None:
+        return []
+    try:
+        conditions: list[str] = []
+        params: list = []
+        if team_id is not None:
+            conditions.append("team_id = ?")
+            params.append(int(team_id))
+        if season:
+            conditions.append("season = ?")
+            params.append(season)
+        where = " WHERE " + " AND ".join(conditions) if conditions else ""
+        rows = conn.execute(
+            f"SELECT * FROM League_Lineups{where} ORDER BY min DESC", params
+        ).fetchall()
+        return _rows_to_dicts(rows)
+    except Exception as exc:
+        _logger.warning("get_league_lineups failed: %s", exc)
+        return []
+    finally:
+        conn.close()
+
+
+def get_common_player_info(player_id: int) -> dict | None:
+    """Return detailed player info from Common_Player_Info."""
+    conn = _get_conn()
+    if conn is None:
+        return None
+    try:
+        row = conn.execute(
+            "SELECT * FROM Common_Player_Info WHERE person_id = ?",
+            (int(player_id),),
+        ).fetchone()
+        return dict(row) if row else None
+    except Exception as exc:
+        _logger.warning("get_common_player_info(%s) failed: %s", player_id, exc)
+        return None
+    finally:
+        conn.close()
+
+
+def get_team_details(team_id: int) -> dict | None:
+    """Return team details (arena, coach, owner, etc.)."""
+    conn = _get_conn()
+    if conn is None:
+        return None
+    try:
+        row = conn.execute(
+            "SELECT * FROM Team_Details WHERE team_id = ?", (int(team_id),)
+        ).fetchone()
+        return dict(row) if row else None
+    except Exception as exc:
+        _logger.warning("get_team_details(%s) failed: %s", team_id, exc)
+        return None
+    finally:
+        conn.close()
+
+
+def get_team_game_stats(game_id: str | None = None,
+                        team_id: int | None = None) -> list[dict]:
+    """Return team-level game stats from Team_Game_Stats."""
+    conn = _get_conn()
+    if conn is None:
+        return []
+    try:
+        conditions: list[str] = []
+        params: list = []
+        if game_id is not None:
+            conditions.append("game_id = ?")
+            params.append(game_id)
+        if team_id is not None:
+            conditions.append("team_id = ?")
+            params.append(int(team_id))
+        where = " WHERE " + " AND ".join(conditions) if conditions else ""
+        rows = conn.execute(
+            f"SELECT * FROM Team_Game_Stats{where}", params
+        ).fetchall()
+        return _rows_to_dicts(rows)
+    except Exception as exc:
+        _logger.warning("get_team_game_stats failed: %s", exc)
+        return []
+    finally:
+        conn.close()
+
+
+# ═══════════════════════════════════════════════════════════════
+# SQL Views — pre-joined convenience queries
+# ═══════════════════════════════════════════════════════════════
+
+
+def get_player_game_full(player_id: int | None = None,
+                         game_id: str | None = None,
+                         limit: int = 50) -> list[dict]:
+    """Query the v_player_game_full view (joins game logs + advanced)."""
+    conn = _get_conn()
+    if conn is None:
+        return []
+    try:
+        conditions: list[str] = []
+        params: list = []
+        if player_id is not None:
+            conditions.append("player_id = ?")
+            params.append(int(player_id))
+        if game_id is not None:
+            conditions.append("game_id = ?")
+            params.append(game_id)
+        where = " WHERE " + " AND ".join(conditions) if conditions else ""
+        params.append(int(limit))
+        rows = conn.execute(
+            f"SELECT * FROM v_player_game_full{where} ORDER BY game_date DESC LIMIT ?",
+            params,
+        ).fetchall()
+        return _rows_to_dicts(rows)
+    except Exception as exc:
+        _logger.warning("get_player_game_full failed: %s", exc)
+        return []
+    finally:
+        conn.close()
+
+
+def get_player_season_profile(player_id: int | None = None,
+                              season: str | None = None) -> list[dict]:
+    """Query the v_player_season_profile view."""
+    conn = _get_conn()
+    if conn is None:
+        return []
+    try:
+        conditions: list[str] = []
+        params: list = []
+        if player_id is not None:
+            conditions.append("player_id = ?")
+            params.append(int(player_id))
+        if season:
+            conditions.append("season = ?")
+            params.append(season)
+        where = " WHERE " + " AND ".join(conditions) if conditions else ""
+        rows = conn.execute(
+            f"SELECT * FROM v_player_season_profile{where} ORDER BY pts DESC",
+            params,
+        ).fetchall()
+        return _rows_to_dicts(rows)
+    except Exception as exc:
+        _logger.warning("get_player_season_profile failed: %s", exc)
+        return []
+    finally:
+        conn.close()
+
+
+def get_team_season_profile(team_id: int | None = None,
+                            season: str | None = None) -> list[dict]:
+    """Query the v_team_season_profile view."""
+    conn = _get_conn()
+    if conn is None:
+        return []
+    try:
+        conditions: list[str] = []
+        params: list = []
+        if team_id is not None:
+            conditions.append("team_id = ?")
+            params.append(int(team_id))
+        if season:
+            conditions.append("season = ?")
+            params.append(season)
+        where = " WHERE " + " AND ".join(conditions) if conditions else ""
+        rows = conn.execute(
+            f"SELECT * FROM v_team_season_profile{where}", params
+        ).fetchall()
+        return _rows_to_dicts(rows)
+    except Exception as exc:
+        _logger.warning("get_team_season_profile failed: %s", exc)
+        return []
+    finally:
+        conn.close()
+
+
+def get_upcoming_matchups() -> list[dict]:
+    """Query the v_upcoming_matchups view."""
+    conn = _get_conn()
+    if conn is None:
+        return []
+    try:
+        rows = conn.execute(
+            "SELECT * FROM v_upcoming_matchups ORDER BY game_date, game_id"
+        ).fetchall()
+        return _rows_to_dicts(rows)
+    except Exception as exc:
+        _logger.warning("get_upcoming_matchups failed: %s", exc)
+        return []
+    finally:
+        conn.close()

@@ -532,29 +532,34 @@ def get_box_score_advanced(game_id: str) -> dict:
 
 
 def get_box_score_usage(game_id: str) -> dict:
-    """Usage box score — not available from DB."""
-    return {}
+    """Return usage box score for a game from the DB."""
+    result = _etl.get_box_score_usage(game_id)
+    return {"players": result} if result else {}
 
 
 def get_player_on_off(team_id: int, season: str | None = None) -> dict:
-    """On/Off court stats — not available from DB."""
+    """On/Off court stats — not yet in DB schema; returns empty."""
     return {}
 
 
 def get_player_estimated_metrics(season: str | None = None) -> list:
-    """Estimated advanced metrics — not available from DB."""
-    return []
+    """Return player estimated advanced metrics from the DB."""
+    return _etl.get_player_estimated_metrics(season=season)
 
 
 def get_player_fantasy_profile(player_id: int,
                                season: str | None = None) -> dict:
-    """Fantasy stat splits — not available from DB."""
+    """Build a fantasy-style profile from league dash + estimated metrics."""
+    profile = _etl.get_player_season_profile(player_id=player_id, season=season)
+    if profile:
+        return profile[0]
     return {}
 
 
 def get_rotations(game_id: str) -> dict:
-    """Rotation data — not available from DB."""
-    return {}
+    """Return rotation (sub-in/out) data for a game from the DB."""
+    result = _etl.get_game_rotation(game_id)
+    return {"rotations": result} if result else {}
 
 
 def get_schedule(game_date: str | None = None) -> list:
@@ -569,57 +574,79 @@ def get_todays_scoreboard() -> dict:
 
 
 # ============================================================
-# TIER 2: High-value wrappers
+# TIER 2: High-value wrappers — powered by SmartPicksProAI DB
 # ============================================================
 
 def get_box_score_matchups(game_id: str) -> dict:
-    return {}
+    """Return defensive matchup data for a game from the DB."""
+    result = _etl.get_box_score_matchups(game_id)
+    return {"matchups": result} if result else {}
 
 
 def get_hustle_box_score(game_id: str) -> dict:
-    return {}
+    """Return hustle box score for a game from the DB."""
+    result = _etl.get_box_score_hustle(game_id)
+    return {"players": result} if result else {}
 
 
 def get_defensive_box_score(game_id: str) -> dict:
-    return {}
+    """Return misc/defensive box score for a game from the DB."""
+    result = _etl.get_box_score_misc(game_id)
+    return {"players": result} if result else {}
 
 
 def get_scoring_box_score(game_id: str) -> dict:
-    return {}
+    """Return scoring breakdown box score for a game from the DB."""
+    result = _etl.get_box_score_scoring(game_id)
+    return {"players": result} if result else {}
 
 
 def get_tracking_box_score(game_id: str) -> dict:
-    return {}
+    """Return player tracking stats for a game from the DB."""
+    result = _etl.get_player_tracking_stats(game_id)
+    return {"players": result} if result else {}
 
 
 def get_four_factors_box_score(game_id: str) -> dict:
-    return {}
+    """Return four-factors box score for a game from the DB."""
+    result = _etl.get_box_score_four_factors(game_id)
+    return {"players": result} if result else {}
 
 
 def get_player_shooting_splits(player_id: int,
                                season: str | None = None) -> dict:
-    return {}
+    """Return shot chart data as shooting splits for a player."""
+    shots = _etl.get_shot_chart(player_id, season=season)
+    return {"shots": shots} if shots else {}
 
 
 def get_shot_chart_v2(player_id: int, season: str | None = None) -> list:
-    return []
+    """Return shot chart data for a player from the DB."""
+    return _etl.get_shot_chart(player_id, season=season)
 
 
 def get_player_clutch_stats(season: str | None = None) -> list:
-    return []
+    """Return player clutch-time stats from the DB."""
+    return _etl.get_player_clutch_stats(season=season)
 
 
 def get_team_lineups(team_id: int, season: str | None = None) -> list:
-    return []
+    """Return lineup data for a team from the DB."""
+    return _etl.get_league_lineups(team_id=team_id, season=season)
 
 
 def get_team_dashboard(team_id: int, season: str | None = None) -> dict:
+    """Return team season profile from the DB."""
+    result = _etl.get_team_season_profile(team_id=team_id, season=season)
+    if result:
+        return result[0]
     return {}
 
 
 def get_team_game_logs(team_id: int, season: str | None = None,
                        last_n: int = 0) -> list:
-    return []
+    """Return team-level game stats from the DB."""
+    return _etl.get_team_game_stats(team_id=team_id)
 
 
 def get_player_year_over_year(player_id: int) -> list:
@@ -629,29 +656,40 @@ def get_player_year_over_year(player_id: int) -> list:
 
 
 # ============================================================
-# TIER 3: Reference & context
+# TIER 3: Reference & context — powered by SmartPicksProAI DB
 # ============================================================
 
 def get_player_vs_player(player1_id: int, player2_id: int,
                          season: str | None = None) -> dict:
+    """Player-vs-player head-to-head — not yet in DB schema."""
     return {}
 
 
 def get_win_probability(game_id: str) -> dict:
-    return {}
+    """Return win probability data for a game from the DB."""
+    result = _etl.get_win_probability(game_id)
+    return {"events": result} if result else {}
 
 
 def get_play_by_play_v2(game_id: str) -> list:
-    return []
+    """Return play-by-play events for a game from the DB."""
+    return _etl.get_play_by_play(game_id)
 
 
 def get_game_summary(game_id: str) -> dict:
-    return {}
+    """Build a game summary from Games + Team_Game_Stats in the DB."""
+    from data.etl_data_service import get_team_game_stats as _get_tgs
+    tgs = _get_tgs(game_id=game_id)
+    # Also fetch the game info itself
+    games = _etl.get_recent_games(limit=500)
+    game_info = next((g for g in games if g.get("game_id") == game_id), None)
+    return {"game": game_info, "team_stats": tgs}
 
 
 def get_team_streak_finder(team_id: int,
                            season: str | None = None) -> list:
-    return []
+    """Return team game-by-game stats for streak analysis from the DB."""
+    return _etl.get_team_game_stats(team_id=team_id)
 
 
 # ============================================================
