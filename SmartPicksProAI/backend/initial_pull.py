@@ -1446,6 +1446,7 @@ def populate_standings(
         "DivisionGamesBack": "division_games_back",
         "ClinchedConferenceTitle": "clinched_conf_title",
         "ClinchedDivisionTitle": "clinched_div_title",
+        # NBA API misspells "Berth" as "Birth" — keep to match upstream.
         "ClinchedPlayoffBirth": "clinched_playoff",
         "EliminatedConference": "eliminated_conf",
         "EliminatedDivision": "eliminated_div",
@@ -1516,7 +1517,7 @@ def populate_player_career_stats(
             ep = PlayerCareerStats(player_id=pid)
             df = ep.get_data_frames()[0]  # SeasonTotalsRegularSeason
         except Exception:
-            logger.debug("Failed to fetch career stats for player %d.", pid)
+            logger.warning("Failed to fetch career stats for player %d.", pid)
             continue
 
         if df.empty:
@@ -1582,7 +1583,7 @@ def populate_player_awards(
             ep = PlayerAwards(player_id=pid)
             df = ep.get_data_frames()[0]
         except Exception:
-            logger.debug("Failed to fetch awards for player %d.", pid)
+            logger.warning("Failed to fetch awards for player %d.", pid)
             continue
 
         if df.empty:
@@ -1655,7 +1656,7 @@ def populate_shot_chart(
             )
             df = ep.get_data_frames()[0]
         except Exception:
-            logger.debug("Failed to fetch shot chart for player %d.", pid)
+            logger.warning("Failed to fetch shot chart for player %d.", pid)
             continue
 
         if df.empty:

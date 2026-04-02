@@ -468,7 +468,7 @@ def _refresh_season_dashboards(
     logger.info("Season-level dashboard tables refreshed.")
 
 
-def _get_new_game_ids(
+def _get_completed_game_ids_in_range(
     conn: sqlite3.Connection, date_from: "date", date_to: "date",
 ) -> list[str]:
     """Return game_ids for completed games in the given date range.
@@ -592,7 +592,7 @@ def run_update(db_path: str = DB_PATH) -> int:
         conn.commit()
 
         # --- Fetch advanced box scores for new games ---
-        new_game_ids = _get_new_game_ids(conn, date_from, yesterday)
+        new_game_ids = _get_completed_game_ids_in_range(conn, date_from, yesterday)
         if new_game_ids:
             logger.info("Fetching advanced box scores for %d new games.", len(new_game_ids))
             initial_pull.populate_game_advanced_box_scores(conn, SEASON, new_game_ids)
