@@ -128,7 +128,10 @@ def _fetch_logs_for_range(date_from: date, date_to: date) -> pd.DataFrame:
         date_to_nullable=str_to,
     )
     time.sleep(2)  # Respect NBA API rate limits.
-    df = endpoint.get_data_frames()[0]
+    df = initial_pull._call_with_retries(
+        lambda: endpoint.get_data_frames()[0],
+        description=f"LeagueGameLog(player, {str_from}–{str_to})",
+    )
     logger.info("API returned %d rows.", len(df))
     return df
 
@@ -160,7 +163,10 @@ def _fetch_team_logs_for_range(date_from: date, date_to: date) -> pd.DataFrame:
         date_to_nullable=str_to,
     )
     time.sleep(2)  # Respect NBA API rate limits.
-    df = endpoint.get_data_frames()[0]
+    df = initial_pull._call_with_retries(
+        lambda: endpoint.get_data_frames()[0],
+        description=f"LeagueGameLog(team, {str_from}–{str_to})",
+    )
     logger.info("Team-level API returned %d rows.", len(df))
     return df
 
@@ -382,12 +388,20 @@ def sync_todays_games(conn: sqlite3.Connection) -> int:
     logger.info("Syncing today's schedule (%s) via ScoreboardV3 …", today_str)
 
     try:
-        scoreboard = ScoreboardV3(game_date=today_str)
+        def _fetch_scoreboard():
+            sb = ScoreboardV3(game_date=today_str)
+            return sb.game_header.get_data_frame(), sb.line_score.get_data_frame()
+
         time.sleep(2)  # Respect NBA API rate limits.
-        game_header = scoreboard.game_header.get_data_frame()
-        line_score = scoreboard.line_score.get_data_frame()
+        game_header, line_score = initial_pull._call_with_retries(
+            _fetch_scoreboard,
+            description=f"ScoreboardV3({today_str})",
+        )
     except Exception:
-        logger.exception("Failed to fetch ScoreboardV3 for %s.", today_str)
+        logger.exception(
+            "Failed to fetch ScoreboardV3 for %s after %d attempts.",
+            today_str, initial_pull._MAX_RETRIES,
+        )
         return 0
 
     if game_header.empty:

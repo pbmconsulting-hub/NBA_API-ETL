@@ -115,6 +115,50 @@ _TEAM_CONFERENCE_DIVISION: dict[str, tuple[str, str]] = {
 
 
 # ---------------------------------------------------------------------------
+# Retry helper
+# ---------------------------------------------------------------------------
+
+_MAX_RETRIES = 3
+
+
+def _call_with_retries(api_callable, description="API call", max_retries=_MAX_RETRIES):
+    """Call *api_callable* up to *max_retries* times with exponential backoff.
+
+    If all attempts fail, the last exception is re-raised so the caller can
+    decide whether to abort or skip (``continue``).
+
+    Args:
+        api_callable: Zero-argument callable that makes the NBA API request.
+        description: Human-readable label used in log messages.
+        max_retries: Maximum number of attempts (default 3).
+
+    Returns:
+        Whatever *api_callable* returns on success.
+
+    Raises:
+        Exception: The last exception raised by *api_callable* after all
+            retries are exhausted.
+    """
+    last_exc: Exception | None = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            return api_callable()
+        except Exception as exc:
+            last_exc = exc
+            if attempt < max_retries:
+                delay = 2 * attempt  # linear back-off: 2 s, 4 s
+                logger.warning(
+                    "%s failed (attempt %d/%d): %s — retrying in %ds …",
+                    description, attempt, max_retries, exc, delay,
+                )
+                time.sleep(delay)
+    logger.warning(
+        "%s failed after %d attempts.", description, max_retries
+    )
+    raise last_exc  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
 # Data Extraction
 # ---------------------------------------------------------------------------
 
@@ -137,12 +181,14 @@ def fetch_season_logs(season: str = SEASON) -> pd.DataFrame:
         DataFrame of raw player game logs.
     """
     logger.info("Fetching player game logs for season %s …", season)
-    endpoint = LeagueGameLog(
-        player_or_team_abbreviation="P",
-        season=season,
-        season_type_all_star="Regular Season",
+    df = _call_with_retries(
+        lambda: LeagueGameLog(
+            player_or_team_abbreviation="P",
+            season=season,
+            season_type_all_star="Regular Season",
+        ).get_data_frames()[0],
+        description="LeagueGameLog(player)",
     )
-    df = endpoint.get_data_frames()[0]
     logger.info("Retrieved %d rows from the API.", len(df))
     return df
 
@@ -166,12 +212,14 @@ def fetch_team_season_logs(season: str = SEASON) -> pd.DataFrame:
     """
     logger.info("Fetching team game logs for season %s …", season)
     time.sleep(2)  # Respect NBA API rate limits.
-    endpoint = LeagueGameLog(
-        player_or_team_abbreviation="T",
-        season=season,
-        season_type_all_star="Regular Season",
+    df = _call_with_retries(
+        lambda: LeagueGameLog(
+            player_or_team_abbreviation="T",
+            season=season,
+            season_type_all_star="Regular Season",
+        ).get_data_frames()[0],
+        description="LeagueGameLog(team)",
     )
-    df = endpoint.get_data_frames()[0]
     logger.info("Retrieved %d team-level rows from the API.", len(df))
     return df
 
@@ -709,10 +757,17 @@ def fetch_and_load_rosters(
     for tid in team_ids:
         try:
             time.sleep(2)  # Respect NBA API rate limits.
-            roster_ep = CommonTeamRoster(team_id=tid, season=season)
-            df = roster_ep.get_data_frames()[0]  # CommonTeamRoster result set
-        except Exception as exc:
-            logger.warning("Failed to fetch roster for team %d: %s", tid, exc)
+            df = _call_with_retries(
+                lambda tid=tid: CommonTeamRoster(
+                    team_id=tid, season=season,
+                ).get_data_frames()[0],
+                description=f"CommonTeamRoster(team={tid})",
+            )
+        except Exception:
+            logger.warning(
+                "Failed to fetch roster for team %d after %d attempts — skipping.",
+                tid, _MAX_RETRIES,
+            )
             continue
 
         if df.empty:
@@ -953,10 +1008,14 @@ def populate_player_clutch_stats(
     logger.info("Fetching player clutch stats for season %s …", season)
     try:
         time.sleep(2)
-        ep = LeagueDashPlayerClutch(season=season, season_type_all_star="Regular Season")
-        df = ep.get_data_frames()[0]
+        df = _call_with_retries(
+            lambda: LeagueDashPlayerClutch(
+                season=season, season_type_all_star="Regular Season",
+            ).get_data_frames()[0],
+            description="LeagueDashPlayerClutch",
+        )
     except Exception:
-        logger.exception("Failed to fetch player clutch stats.")
+        logger.exception("Failed to fetch player clutch stats after %d attempts — skipping.", _MAX_RETRIES)
         return
 
     if df.empty:
@@ -997,10 +1056,14 @@ def populate_team_clutch_stats(
     logger.info("Fetching team clutch stats for season %s …", season)
     try:
         time.sleep(2)
-        ep = LeagueDashTeamClutch(season=season, season_type_all_star="Regular Season")
-        df = ep.get_data_frames()[0]
+        df = _call_with_retries(
+            lambda: LeagueDashTeamClutch(
+                season=season, season_type_all_star="Regular Season",
+            ).get_data_frames()[0],
+            description="LeagueDashTeamClutch",
+        )
     except Exception:
-        logger.exception("Failed to fetch team clutch stats.")
+        logger.exception("Failed to fetch team clutch stats after %d attempts — skipping.", _MAX_RETRIES)
         return
 
     if df.empty:
@@ -1041,10 +1104,14 @@ def populate_player_hustle_stats(
     logger.info("Fetching player hustle stats for season %s …", season)
     try:
         time.sleep(2)
-        ep = LeagueHustleStatsPlayer(season=season, season_type_all_star="Regular Season")
-        df = ep.get_data_frames()[0]
+        df = _call_with_retries(
+            lambda: LeagueHustleStatsPlayer(
+                season=season, season_type_all_star="Regular Season",
+            ).get_data_frames()[0],
+            description="LeagueHustleStatsPlayer",
+        )
     except Exception:
-        logger.exception("Failed to fetch player hustle stats.")
+        logger.exception("Failed to fetch player hustle stats after %d attempts — skipping.", _MAX_RETRIES)
         return
 
     if df.empty:
@@ -1096,10 +1163,14 @@ def populate_team_hustle_stats(
     logger.info("Fetching team hustle stats for season %s …", season)
     try:
         time.sleep(2)
-        ep = LeagueHustleStatsTeam(season=season, season_type_all_star="Regular Season")
-        df = ep.get_data_frames()[0]
+        df = _call_with_retries(
+            lambda: LeagueHustleStatsTeam(
+                season=season, season_type_all_star="Regular Season",
+            ).get_data_frames()[0],
+            description="LeagueHustleStatsTeam",
+        )
     except Exception:
-        logger.exception("Failed to fetch team hustle stats.")
+        logger.exception("Failed to fetch team hustle stats after %d attempts — skipping.", _MAX_RETRIES)
         return
 
     if df.empty:
@@ -1147,10 +1218,14 @@ def populate_player_bio(
     logger.info("Fetching player bio stats for season %s …", season)
     try:
         time.sleep(2)
-        ep = LeagueDashPlayerBioStats(season=season, season_type_all_star="Regular Season")
-        df = ep.get_data_frames()[0]
+        df = _call_with_retries(
+            lambda: LeagueDashPlayerBioStats(
+                season=season, season_type_all_star="Regular Season",
+            ).get_data_frames()[0],
+            description="LeagueDashPlayerBioStats",
+        )
     except Exception:
-        logger.exception("Failed to fetch player bio stats.")
+        logger.exception("Failed to fetch player bio stats after %d attempts — skipping.", _MAX_RETRIES)
         return
 
     if df.empty:
@@ -1193,10 +1268,14 @@ def populate_player_estimated_metrics(
     logger.info("Fetching player estimated metrics for season %s …", season)
     try:
         time.sleep(2)
-        ep = PlayerEstimatedMetrics(season=season, season_type="Regular Season")
-        df = ep.get_data_frames()[0]
+        df = _call_with_retries(
+            lambda: PlayerEstimatedMetrics(
+                season=season, season_type="Regular Season",
+            ).get_data_frames()[0],
+            description="PlayerEstimatedMetrics",
+        )
     except Exception:
-        logger.exception("Failed to fetch player estimated metrics.")
+        logger.exception("Failed to fetch player estimated metrics after %d attempts — skipping.", _MAX_RETRIES)
         return
 
     if df.empty:
@@ -1235,10 +1314,14 @@ def populate_team_estimated_metrics(
     logger.info("Fetching team estimated metrics for season %s …", season)
     try:
         time.sleep(2)
-        ep = TeamEstimatedMetrics(season=season, season_type="Regular Season")
-        df = ep.get_data_frames()[0]
+        df = _call_with_retries(
+            lambda: TeamEstimatedMetrics(
+                season=season, season_type="Regular Season",
+            ).get_data_frames()[0],
+            description="TeamEstimatedMetrics",
+        )
     except Exception:
-        logger.exception("Failed to fetch team estimated metrics.")
+        logger.exception("Failed to fetch team estimated metrics after %d attempts — skipping.", _MAX_RETRIES)
         return
 
     if df.empty:
@@ -1277,10 +1360,14 @@ def populate_league_dash_player_stats(
     logger.info("Fetching league dash player stats for season %s …", season)
     try:
         time.sleep(2)
-        ep = LeagueDashPlayerStats(season=season, season_type_all_star="Regular Season")
-        df = ep.get_data_frames()[0]
+        df = _call_with_retries(
+            lambda: LeagueDashPlayerStats(
+                season=season, season_type_all_star="Regular Season",
+            ).get_data_frames()[0],
+            description="LeagueDashPlayerStats",
+        )
     except Exception:
-        logger.exception("Failed to fetch league dash player stats.")
+        logger.exception("Failed to fetch league dash player stats after %d attempts — skipping.", _MAX_RETRIES)
         return
 
     if df.empty:
@@ -1323,10 +1410,14 @@ def populate_league_dash_team_stats(
     logger.info("Fetching league dash team stats for season %s …", season)
     try:
         time.sleep(2)
-        ep = LeagueDashTeamStats(season=season, season_type_all_star="Regular Season")
-        df = ep.get_data_frames()[0]
+        df = _call_with_retries(
+            lambda: LeagueDashTeamStats(
+                season=season, season_type_all_star="Regular Season",
+            ).get_data_frames()[0],
+            description="LeagueDashTeamStats",
+        )
     except Exception:
-        logger.exception("Failed to fetch league dash team stats.")
+        logger.exception("Failed to fetch league dash team stats after %d attempts — skipping.", _MAX_RETRIES)
         return
 
     if df.empty:
@@ -1367,10 +1458,14 @@ def populate_league_leaders(
     logger.info("Fetching league leaders for season %s …", season)
     try:
         time.sleep(2)
-        ep = LeagueLeaders(season=season, season_type_all_star="Regular Season")
-        df = ep.get_data_frames()[0]
+        df = _call_with_retries(
+            lambda: LeagueLeaders(
+                season=season, season_type_all_star="Regular Season",
+            ).get_data_frames()[0],
+            description="LeagueLeaders",
+        )
     except Exception:
-        logger.exception("Failed to fetch league leaders.")
+        logger.exception("Failed to fetch league leaders after %d attempts — skipping.", _MAX_RETRIES)
         return
 
     if df.empty:
@@ -1411,10 +1506,14 @@ def populate_standings(
     logger.info("Fetching standings for season %s …", season)
     try:
         time.sleep(2)
-        ep = LeagueStandingsV3(season=season, season_type="Regular Season")
-        df = ep.get_data_frames()[0]
+        df = _call_with_retries(
+            lambda: LeagueStandingsV3(
+                season=season, season_type="Regular Season",
+            ).get_data_frames()[0],
+            description="LeagueStandingsV3",
+        )
     except Exception:
-        logger.exception("Failed to fetch standings.")
+        logger.exception("Failed to fetch standings after %d attempts — skipping.", _MAX_RETRIES)
         return
 
     if df.empty:
@@ -1513,10 +1612,17 @@ def populate_player_career_stats(
     for i, pid in enumerate(player_ids):
         try:
             time.sleep(1)  # Rate limit — ~1 req/sec for per-player endpoints.
-            ep = PlayerCareerStats(player_id=pid)
-            df = ep.get_data_frames()[0]  # SeasonTotalsRegularSeason
+            df = _call_with_retries(
+                lambda pid=pid: PlayerCareerStats(
+                    player_id=pid,
+                ).get_data_frames()[0],
+                description=f"PlayerCareerStats(player={pid})",
+            )
         except Exception:
-            logger.warning("Failed to fetch career stats for player %d.", pid)
+            logger.warning(
+                "Failed to fetch career stats for player %d after %d attempts — skipping.",
+                pid, _MAX_RETRIES,
+            )
             continue
 
         if df.empty:
@@ -1581,16 +1687,21 @@ def populate_shot_chart(
     for i, pid in enumerate(player_ids):
         try:
             time.sleep(1)
-            ep = ShotChartDetail(
-                team_id=0,
-                player_id=pid,
-                season_nullable=season,
-                season_type_all_star="Regular Season",
-                context_measure_simple="FGA",
+            df = _call_with_retries(
+                lambda pid=pid: ShotChartDetail(
+                    team_id=0,
+                    player_id=pid,
+                    season_nullable=season,
+                    season_type_all_star="Regular Season",
+                    context_measure_simple="FGA",
+                ).get_data_frames()[0],
+                description=f"ShotChartDetail(player={pid})",
             )
-            df = ep.get_data_frames()[0]
         except Exception:
-            logger.warning("Failed to fetch shot chart for player %d.", pid)
+            logger.warning(
+                "Failed to fetch shot chart for player %d after %d attempts — skipping.",
+                pid, _MAX_RETRIES,
+            )
             continue
 
         if df.empty:
@@ -1720,8 +1831,10 @@ def _fetch_single_game_box_scores(
     # --- Box Score Advanced ---
     try:
         time.sleep(1)
-        ep = BoxScoreAdvancedV3(game_id=game_id)
-        df = ep.get_data_frames()[0]  # PlayerStats
+        df = _call_with_retries(
+            lambda: BoxScoreAdvancedV3(game_id=game_id).get_data_frames()[0],
+            description=f"BoxScoreAdvancedV3(game={game_id})",
+        )
         if not df.empty:
             col_map = {
                 "gameId": "game_id", "personId": "person_id",
@@ -1755,13 +1868,15 @@ def _fetch_single_game_box_scores(
                 result["game_id"] = game_id
             result.to_sql("Box_Score_Advanced", conn, if_exists="append", index=False)
     except Exception:
-        logger.debug("BoxScoreAdvancedV3 failed for game %s.", game_id)
+        logger.debug("BoxScoreAdvancedV3 failed for game %s after %d attempts.", game_id, _MAX_RETRIES)
 
     # --- Box Score Scoring ---
     try:
         time.sleep(1)
-        ep = BoxScoreScoringV3(game_id=game_id)
-        df = ep.get_data_frames()[0]
+        df = _call_with_retries(
+            lambda: BoxScoreScoringV3(game_id=game_id).get_data_frames()[0],
+            description=f"BoxScoreScoringV3(game={game_id})",
+        )
         if not df.empty:
             col_map = {
                 "gameId": "game_id", "personId": "person_id",
@@ -1789,13 +1904,15 @@ def _fetch_single_game_box_scores(
                 result["game_id"] = game_id
             result.to_sql("Box_Score_Scoring", conn, if_exists="append", index=False)
     except Exception:
-        logger.debug("BoxScoreScoringV3 failed for game %s.", game_id)
+        logger.debug("BoxScoreScoringV3 failed for game %s after %d attempts.", game_id, _MAX_RETRIES)
 
     # --- Box Score Usage ---
     try:
         time.sleep(1)
-        ep = BoxScoreUsageV3(game_id=game_id)
-        df = ep.get_data_frames()[0]
+        df = _call_with_retries(
+            lambda: BoxScoreUsageV3(game_id=game_id).get_data_frames()[0],
+            description=f"BoxScoreUsageV3(game={game_id})",
+        )
         if not df.empty:
             col_map = {
                 "gameId": "game_id", "personId": "person_id",
@@ -1826,13 +1943,15 @@ def _fetch_single_game_box_scores(
                 result["game_id"] = game_id
             result.to_sql("Box_Score_Usage", conn, if_exists="append", index=False)
     except Exception:
-        logger.debug("BoxScoreUsageV3 failed for game %s.", game_id)
+        logger.debug("BoxScoreUsageV3 failed for game %s after %d attempts.", game_id, _MAX_RETRIES)
 
     # --- Box Score Player Tracking ---
     try:
         time.sleep(1)
-        ep = BoxScorePlayerTrackV3(game_id=game_id)
-        df = ep.get_data_frames()[0]
+        df = _call_with_retries(
+            lambda: BoxScorePlayerTrackV3(game_id=game_id).get_data_frames()[0],
+            description=f"BoxScorePlayerTrackV3(game={game_id})",
+        )
         if not df.empty:
             col_map = {
                 "gameId": "game_id", "personId": "person_id",
@@ -1866,13 +1985,15 @@ def _fetch_single_game_box_scores(
                 result["game_id"] = game_id
             result.to_sql("Player_Tracking_Stats", conn, if_exists="append", index=False)
     except Exception:
-        logger.debug("BoxScorePlayerTrackV3 failed for game %s.", game_id)
+        logger.debug("BoxScorePlayerTrackV3 failed for game %s after %d attempts.", game_id, _MAX_RETRIES)
 
     # --- Box Score Matchups ---
     try:
         time.sleep(1)
-        ep = BoxScoreMatchupsV3(game_id=game_id)
-        df = ep.get_data_frames()[0]
+        df = _call_with_retries(
+            lambda: BoxScoreMatchupsV3(game_id=game_id).get_data_frames()[0],
+            description=f"BoxScoreMatchupsV3(game={game_id})",
+        )
         if not df.empty:
             col_map = {
                 "gameId": "game_id",
@@ -1913,7 +2034,7 @@ def _fetch_single_game_box_scores(
                 result["game_id"] = game_id
             result.to_sql("Box_Score_Matchups", conn, if_exists="append", index=False)
     except Exception:
-        logger.debug("BoxScoreMatchupsV3 failed for game %s.", game_id)
+        logger.debug("BoxScoreMatchupsV3 failed for game %s after %d attempts.", game_id, _MAX_RETRIES)
 
 
 # ---------------------------------------------------------------------------
