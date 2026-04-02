@@ -1,25 +1,26 @@
 # ============================================================
 # FILE: data/nba_data_service.py
-# PURPOSE: Thin delegation layer that routes all NBA data
-#          retrieval through data/bdl_bridge.py (BallDontLie API
-#          — primary) with data/live_data_fetcher.py (nba_api)
-#          as fallback.
+# PURPOSE: Thin delegation layer that routes ALL NBA data
+#          retrieval through data/etl_data_service.py
+#          (SmartPicksProAI database).
 #
-#          This module preserves the public API that every page
-#          and engine module imports (get_todays_games, etc.)
-#          while the actual fetching is routed: BDL first → nba_api
-#          fallback.
+#          NO live API calls are made from this module.
+#          All data originates from the SmartPicksProAI ETL
+#          pipeline SQLite database.
 #
-# DATA SOURCES (priority order):
-#   1. BallDontLie API (via bdl_bridge.py) — primary
-#   2. nba_api / stats.nba.com (via live_data_fetcher.py) — fallback
-#   3. PrizePicks / Underdog / DraftKings (via platform_fetcher.py)
-#      — props only, unchanged
+# DATA SOURCES:
+#   1. SmartPicksProAI DB (via etl_data_service.py) — all NBA data
+#   2. PrizePicks / Underdog / DraftKings (via sportsbook_service.py
+#      and platform_fetcher.py) — props only, unchanged
 # ============================================================
 
-from pathlib import Path as _Path
+from __future__ import annotations
+
 import datetime as _datetime
+import json as _json
 import logging as _logging
+from pathlib import Path as _Path
+from typing import Any
 
 try:
     from utils.logger import get_logger
@@ -27,839 +28,665 @@ try:
 except ImportError:
     _logger = _logging.getLogger(__name__)
 
-# Import utility-layer cache helpers for cross-module cache management.
-# FileCache provides file-based caching; used by clear_caches() to
-# clear downstream caches in live_data_fetcher and roster_engine.
+# ── ETL data service — sole data source ──────────────────────
+import data.etl_data_service as _etl
+
+# ── File-cache helper (for class wrapper) ────────────────────
 try:
     from utils.cache import FileCache as _FileCache
     _HAS_FILE_CACHE = True
 except ImportError:
     _HAS_FILE_CACHE = False
 
-# Import retry helper for the refresh_all_data convenience function.
-try:
-    from utils.retry import retry_with_backoff as _retry_with_backoff
-    _HAS_RETRY = True
-except ImportError:
-    _HAS_RETRY = False
+# ============================================================
+# INLINED CONSTANTS (previously imported from live_data_fetcher)
+# ============================================================
 
-# ── BDL bridge — primary data source ─────────────────────────
-# BallDontLie is now the primary source for games, players, stats,
-# standings, game logs, injuries, and box scores.  nba_api is kept
-# as a fallback layer only.
-try:
-    from data.bdl_bridge import (
-        is_available as _bdl_is_available,
-        fetch_todays_games as _bdl_fetch_todays_games,
-        fetch_team_records as _bdl_fetch_team_records,
-        fetch_player_game_log as _bdl_fetch_player_game_log,
-        fetch_player_recent_form as _bdl_fetch_player_recent_form,
-        fetch_team_stats_for_csv as _bdl_fetch_team_stats_for_csv,
-        fetch_standings_list as _bdl_fetch_standings_list,
-        fetch_injuries as _bdl_fetch_injuries,
-        fetch_league_leaders as _bdl_fetch_league_leaders,
-        fetch_box_scores_live as _bdl_fetch_box_scores_live,
-        fetch_box_scores as _bdl_fetch_box_scores,
-        fetch_lineups as _bdl_fetch_lineups,
-        fetch_plays as _bdl_fetch_plays,
-        fetch_active_players as _bdl_fetch_active_players,
-    )
-    _BDL_AVAILABLE = _bdl_is_available()
-except ImportError:
-    _BDL_AVAILABLE = False
+DATA_DIRECTORY: _Path = _Path(__file__).parent
+PLAYERS_CSV_PATH: _Path = DATA_DIRECTORY / "players.csv"
+TEAMS_CSV_PATH: _Path = DATA_DIRECTORY / "teams.csv"
+DEFENSIVE_RATINGS_CSV_PATH: _Path = DATA_DIRECTORY / "defensive_ratings.csv"
+LAST_UPDATED_JSON_PATH: _Path = DATA_DIRECTORY / "last_updated.json"
+INJURY_STATUS_JSON_PATH: _Path = DATA_DIRECTORY / "injury_status.json"
 
-# Mapping from nba_api stat category names to BDL stat type names.
-_NBA_API_TO_BDL_STAT_MAP: dict[str, str] = {
-    "PTS": "pts", "REB": "reb", "AST": "ast", "STL": "stl",
-    "BLK": "blk", "FG3M": "fg3m", "FG_PCT": "fg_pct", "FT_PCT": "ft_pct",
+API_DELAY_SECONDS: float = 1.5
+FALLBACK_POINTS_STD_RATIO: float = 0.3
+FALLBACK_REBOUNDS_STD_RATIO: float = 0.4
+FALLBACK_ASSISTS_STD_RATIO: float = 0.4
+FALLBACK_THREES_STD_RATIO: float = 0.55
+FALLBACK_STEALS_STD_RATIO: float = 0.5
+FALLBACK_BLOCKS_STD_RATIO: float = 0.6
+FALLBACK_TURNOVERS_STD_RATIO: float = 0.4
+MIN_MINUTES_THRESHOLD: float = 15.0
+GP_ABSENT_THRESHOLD: int = 12
+MIN_TEAM_GP_FOR_RECENCY_CHECK: int = 20
+HOT_TREND_THRESHOLD: float = 1.1
+COLD_TREND_THRESHOLD: float = 0.9
+DEFAULT_VEGAS_SPREAD: float = 0.0
+DEFAULT_GAME_TOTAL: float = 220.0
+ESPN_API_TIMEOUT_SECONDS: int = 10
+
+INACTIVE_INJURY_STATUSES: frozenset = frozenset({
+    "Out",
+    "Doubtful",
+    "Questionable",
+    "Injured Reserve",
+    "Out (No Recent Games)",
+    "Suspended",
+    "Not With Team",
+    "G League - Two-Way",
+    "G League - On Assignment",
+    "G League",
+})
+
+GTD_INJURY_STATUSES: frozenset = frozenset({
+    "GTD",
+    "Day-to-Day",
+})
+
+TEAM_NAME_TO_ABBREVIATION: dict[str, str] = {
+    "Atlanta Hawks": "ATL",
+    "Boston Celtics": "BOS",
+    "Brooklyn Nets": "BKN",
+    "Charlotte Hornets": "CHA",
+    "Chicago Bulls": "CHI",
+    "Cleveland Cavaliers": "CLE",
+    "Dallas Mavericks": "DAL",
+    "Denver Nuggets": "DEN",
+    "Detroit Pistons": "DET",
+    "Golden State Warriors": "GSW",
+    "Houston Rockets": "HOU",
+    "Indiana Pacers": "IND",
+    "Los Angeles Clippers": "LAC",
+    "Los Angeles Lakers": "LAL",
+    "Memphis Grizzlies": "MEM",
+    "Miami Heat": "MIA",
+    "Milwaukee Bucks": "MIL",
+    "Minnesota Timberwolves": "MIN",
+    "New Orleans Pelicans": "NOP",
+    "New York Knicks": "NYK",
+    "Oklahoma City Thunder": "OKC",
+    "Orlando Magic": "ORL",
+    "Philadelphia 76ers": "PHI",
+    "Phoenix Suns": "PHX",
+    "Portland Trail Blazers": "POR",
+    "Sacramento Kings": "SAC",
+    "San Antonio Spurs": "SAS",
+    "Toronto Raptors": "TOR",
+    "Utah Jazz": "UTA",
+    "Washington Wizards": "WAS",
 }
 
-# ── Re-export every public symbol from live_data_fetcher ─────
-# Pages import constants and path objects from this module;
-# live_data_fetcher defines them identically.
-from data.live_data_fetcher import (               # noqa: F401 – re-exports
-    # Path constants
-    DATA_DIRECTORY,
-    PLAYERS_CSV_PATH,
-    TEAMS_CSV_PATH,
-    DEFENSIVE_RATINGS_CSV_PATH,
-    LAST_UPDATED_JSON_PATH,
-    INJURY_STATUS_JSON_PATH,
-    # Tuning constants
-    API_DELAY_SECONDS,
-    FALLBACK_POINTS_STD_RATIO,
-    FALLBACK_REBOUNDS_STD_RATIO,
-    FALLBACK_ASSISTS_STD_RATIO,
-    FALLBACK_THREES_STD_RATIO,
-    FALLBACK_STEALS_STD_RATIO,
-    FALLBACK_BLOCKS_STD_RATIO,
-    FALLBACK_TURNOVERS_STD_RATIO,
-    MIN_MINUTES_THRESHOLD,
-    GP_ABSENT_THRESHOLD,
-    MIN_TEAM_GP_FOR_RECENCY_CHECK,
-    HOT_TREND_THRESHOLD,
-    COLD_TREND_THRESHOLD,
-    DEFAULT_VEGAS_SPREAD,
-    DEFAULT_GAME_TOTAL,
-    ESPN_API_TIMEOUT_SECONDS,
-    INACTIVE_INJURY_STATUSES,
-    GTD_INJURY_STATUSES,
-    # Team lookups
-    TEAM_NAME_TO_ABBREVIATION,
-    NBA_API_ABBREV_TO_OURS,
-    TEAM_CONFERENCE,
-    # Timestamp functions
-    save_last_updated,
-    load_last_updated,
-    # Staleness
-    get_teams_staleness_warning,
-    # Cached roster helper
-    get_cached_roster,
-    # Season helper
-    _current_season,
-)
+NBA_API_ABBREV_TO_OURS: dict[str, str] = {
+    "ATL": "ATL", "BOS": "BOS", "BKN": "BKN", "CHA": "CHA",
+    "CHI": "CHI", "CLE": "CLE", "DAL": "DAL", "DEN": "DEN",
+    "DET": "DET", "GSW": "GSW", "HOU": "HOU", "IND": "IND",
+    "LAC": "LAC", "LAL": "LAL", "MEM": "MEM", "MIA": "MIA",
+    "MIL": "MIL", "MIN": "MIN", "NOP": "NOP", "NYK": "NYK",
+    "OKC": "OKC", "ORL": "ORL", "PHI": "PHI", "PHX": "PHX",
+    "POR": "POR", "SAC": "SAC", "SAS": "SAS", "TOR": "TOR",
+    "UTA": "UTA", "WAS": "WAS",
+    # Common alternative abbreviations
+    "GS": "GSW", "NY": "NYK", "NO": "NOP", "SA": "SAS",
+}
 
-# Import live_data_fetcher functions under private names so we can
-# expose them with the current ``get_*`` naming convention.
-from data.live_data_fetcher import (
-    fetch_todays_games as _ldf_fetch_todays_games,
-    fetch_todays_players_only as _ldf_fetch_todays_players,
-    fetch_player_recent_form as _ldf_fetch_player_recent_form,
-    fetch_player_stats as _ldf_fetch_player_stats,
-    fetch_team_stats as _ldf_fetch_team_stats,
-    fetch_defensive_ratings as _ldf_fetch_defensive_ratings,
-    fetch_player_game_log as _ldf_fetch_player_game_log,
-    fetch_all_data as _ldf_fetch_all_data,
-    fetch_all_todays_data as _ldf_fetch_all_todays_data,
-    fetch_active_rosters as _ldf_fetch_active_rosters,
-    refresh_from_etl as _ldf_refresh_from_etl,          # noqa: F401
-    full_refresh_from_etl as _ldf_full_refresh_from_etl, # noqa: F401
-)
+TEAM_CONFERENCE: dict[str, str] = {
+    "ATL": "East", "BOS": "East", "BKN": "East", "CHA": "East",
+    "CHI": "East", "CLE": "East", "DET": "East", "IND": "East",
+    "MIA": "East", "MIL": "East", "NYK": "East", "ORL": "East",
+    "PHI": "East", "TOR": "East", "WAS": "East",
+    "DAL": "West", "DEN": "West", "GSW": "West", "HOU": "West",
+    "LAC": "West", "LAL": "West", "MEM": "West", "MIN": "West",
+    "NOP": "West", "OKC": "West", "PHX": "West", "POR": "West",
+    "SAC": "West", "SAS": "West", "UTA": "West",
+}
 
 
 # ============================================================
-# Public API — name-compatible wrappers around live_data_fetcher
+# Utility helpers
 # ============================================================
 
-def get_todays_games():
-    """Retrieve tonight's NBA games — BDL primary, nba_api fallback."""
-    if _BDL_AVAILABLE:
-        result = _bdl_fetch_todays_games()
-        if result:
-            return result
-        _logger.debug("get_todays_games: BDL returned empty, falling back to nba_api")
-    result = _ldf_fetch_todays_games()
+def _nba_today_et() -> _datetime.date:
+    """Return today's date anchored to US/Eastern time."""
+    try:
+        from zoneinfo import ZoneInfo
+        _eastern = ZoneInfo("America/New_York")
+    except ImportError:
+        _eastern = _datetime.timezone(_datetime.timedelta(hours=-5))
+    return _datetime.datetime.now(_eastern).date()
+
+
+def _current_season() -> str:
+    """Return the current NBA season string in 'YYYY-YY' format."""
+    now = _datetime.date.today()
+    year = now.year if now.month >= 10 else now.year - 1
+    return f"{year}-{str(year + 1)[-2:]}"
+
+
+def save_last_updated(data_type: str) -> None:
+    """Save the current timestamp to last_updated.json for a given data type."""
+    existing: dict = {}
+    if LAST_UPDATED_JSON_PATH.exists():
+        try:
+            with open(LAST_UPDATED_JSON_PATH, "r") as f:
+                existing = _json.load(f)
+        except Exception:
+            existing = {}
+    existing[data_type] = _datetime.datetime.now(_datetime.timezone.utc).isoformat()
+    existing["is_live"] = True
+    try:
+        with open(LAST_UPDATED_JSON_PATH, "w") as f:
+            _json.dump(existing, f, indent=2)
+    except Exception as exc:
+        _logger.warning("Could not save timestamp: %s", exc)
+
+
+def load_last_updated() -> dict:
+    """Load all timestamps from last_updated.json."""
+    if not LAST_UPDATED_JSON_PATH.exists():
+        return {}
+    try:
+        with open(LAST_UPDATED_JSON_PATH, "r") as f:
+            return _json.load(f)
+    except Exception:
+        return {}
+
+
+def get_teams_staleness_warning() -> str | None:
+    """Return a warning string if team data is stale, or None if fresh."""
+    _WARN_DAYS = 7
+    _STALE_DAYS = 14
+    timestamps = load_last_updated()
+    teams_ts_str = timestamps.get("teams")
+    if not teams_ts_str:
+        return "⚠️ teams.csv has never been updated — run Data Feed → Fetch Team Stats."
+    try:
+        teams_ts = _datetime.datetime.fromisoformat(str(teams_ts_str))
+        _now_utc = _datetime.datetime.now(_datetime.timezone.utc)
+        if teams_ts.tzinfo is None:
+            teams_ts = teams_ts.replace(tzinfo=_datetime.timezone.utc)
+        age_days = (_now_utc - teams_ts).total_seconds() / 86400.0
+        if age_days >= _STALE_DAYS:
+            return (
+                f"🔴 Team data is **{age_days:.0f} days old** — seriously stale! "
+                "Go to 📡 Data Feed → Fetch Team Stats to refresh defensive ratings."
+            )
+        if age_days >= _WARN_DAYS:
+            return (
+                f"🟡 Team data is **{age_days:.0f} days old**. "
+                "Consider refreshing via 📡 Data Feed → Fetch Team Stats."
+            )
+    except Exception:
+        return "⚠️ Could not determine team data age — check last_updated.json."
+    return None
+
+
+# ============================================================
+# Sportsbook / props re-exports
+# ============================================================
+
+try:
+    from data.sportsbook_service import (  # noqa: F401
+        get_prizepicks_props,
+        get_underdog_props,
+        get_draftkings_props,
+        get_all_sportsbook_props,
+        smart_filter_props,
+        parse_alt_lines_from_platform_props,
+        enrich_props_with_csv_names,
+    )
+except ImportError:
+    def get_prizepicks_props(*a, **kw):
+        return []
+
+    def get_underdog_props(*a, **kw):
+        return []
+
+    def get_draftkings_props(*a, **kw):
+        return []
+
+    def get_all_sportsbook_props(*a, **kw):
+        return {"prizepicks": [], "underdog": [], "draftkings": []}
+
+    def smart_filter_props(*a, **kw):
+        return []
+
+    def parse_alt_lines_from_platform_props(*a, **kw):
+        return []
+
+    def enrich_props_with_csv_names(*a, **kw):
+        return []
+
+
+# ============================================================
+# Public API — Core functions
+# ============================================================
+
+
+def get_todays_games() -> list:
+    """Retrieve tonight's NBA games from the SmartPicksProAI database."""
+    result = _etl.get_todays_games()
     if not result:
-        _logger.warning("get_todays_games: all sources returned no games")
+        _logger.debug("get_todays_games: DB returned no games for today")
     return result
 
 
 def get_todays_players(todays_games, progress_callback=None,
-                       precomputed_injury_map=None):
-    """Retrieve players for tonight's games via nba_api."""
-    return _ldf_fetch_todays_players(
-        todays_games,
-        progress_callback=progress_callback,
-        precomputed_injury_map=precomputed_injury_map,
-    )
+                       precomputed_injury_map=None) -> list:
+    """Retrieve players for tonight's games from the DB by team."""
+    if not todays_games:
+        return []
+
+    all_players: list[dict] = []
+    total = len(todays_games)
+
+    # Build a set of team abbreviations from the games
+    team_abbrevs: set[str] = set()
+    for g in todays_games:
+        for key in ("home_team", "away_team", "home_abbrev", "away_abbrev"):
+            t = str(g.get(key, "")).upper().strip()
+            if t and len(t) <= 4:
+                team_abbrevs.add(t)
+        # Parse matchup string (e.g. "LAL vs. BOS")
+        matchup = g.get("matchup", "")
+        if matchup:
+            for part in str(matchup).replace("@", "vs.").split("vs."):
+                part = part.strip().upper()
+                if len(part) == 3:
+                    team_abbrevs.add(part)
+
+    if progress_callback:
+        progress_callback(0, total, "Loading players from DB…")
+
+    # Get all players from DB, then filter by team
+    db_players = _etl.get_all_players()
+    for p in db_players:
+        p_team = str(p.get("team_abbreviation", "")).upper().strip()
+        if p_team in team_abbrevs:
+            player_dict = {
+                "player_id": p.get("player_id"),
+                "name": f"{p.get('first_name', '')} {p.get('last_name', '')}".strip(),
+                "team": p.get("team_abbreviation", ""),
+                "position": p.get("position", ""),
+                "gp": p.get("gp", 0),
+                "ppg": p.get("ppg", 0.0),
+                "rpg": p.get("rpg", 0.0),
+                "apg": p.get("apg", 0.0),
+                "spg": p.get("spg", 0.0),
+                "bpg": p.get("bpg", 0.0),
+                "topg": p.get("topg", 0.0),
+                "mpg": p.get("mpg", 0.0),
+                "fg3_avg": p.get("fg3_avg", 0.0),
+                "ftm_avg": p.get("ftm_avg", 0.0),
+                "fta_avg": p.get("fta_avg", 0.0),
+                "ft_pct_avg": p.get("ft_pct_avg", 0.0),
+                "fgm_avg": p.get("fgm_avg", 0.0),
+                "fga_avg": p.get("fga_avg", 0.0),
+                "fg_pct_avg": p.get("fg_pct_avg", 0.0),
+                "oreb_avg": p.get("oreb_avg", 0.0),
+                "dreb_avg": p.get("dreb_avg", 0.0),
+                "pf_avg": p.get("pf_avg", 0.0),
+                "plus_minus_avg": p.get("plus_minus_avg", 0.0),
+                "points_std": p.get("points_std", 0.0),
+                "rebounds_std": p.get("rebounds_std", 0.0),
+                "assists_std": p.get("assists_std", 0.0),
+                "threes_std": p.get("threes_std", 0.0),
+            }
+            # Apply injury map if provided
+            if precomputed_injury_map:
+                name = player_dict["name"]
+                if name in precomputed_injury_map:
+                    player_dict["injury_status"] = precomputed_injury_map[name]
+            all_players.append(player_dict)
+
+    if progress_callback:
+        progress_callback(total, total, f"Loaded {len(all_players)} players from DB.")
+
+    return all_players
 
 
-def get_player_recent_form(player_id, last_n_games=10):
-    """Get a player's recent-form stats — BDL primary, nba_api fallback."""
-    if _BDL_AVAILABLE:
+def get_player_recent_form(player_id, last_n_games: int = 10) -> dict:
+    """Get a player's recent-form stats from the DB."""
+    logs = _etl.get_player_game_logs(player_id, limit=last_n_games)
+    if not logs:
+        return {}
+
+    def safe_avg(values: list) -> float:
+        valid = [v for v in values if v is not None]
+        return round(sum(valid) / len(valid), 1) if valid else 0.0
+
+    def parse_min(m) -> float:
+        if m is None:
+            return 0.0
+        m = str(m)
         try:
-            result = _bdl_fetch_player_recent_form(int(player_id), last_n_games=last_n_games)
-            if result:
-                return result
-        except Exception:
-            pass
-    result = _ldf_fetch_player_recent_form(player_id, last_n_games=last_n_games)
-    if not result:
-        _logger.debug("get_player_recent_form(%s): all sources returned no data", player_id)
+            if ":" in m:
+                parts = m.split(":")
+                return float(parts[0]) + float(parts[1]) / 60.0
+            return float(m)
+        except (ValueError, TypeError):
+            return 0.0
+
+    return {
+        "games_played": len(logs),
+        "ppg": safe_avg([float(g.get("pts", 0) or 0) for g in logs]),
+        "rpg": safe_avg([float(g.get("reb", 0) or 0) for g in logs]),
+        "apg": safe_avg([float(g.get("ast", 0) or 0) for g in logs]),
+        "spg": safe_avg([float(g.get("stl", 0) or 0) for g in logs]),
+        "bpg": safe_avg([float(g.get("blk", 0) or 0) for g in logs]),
+        "topg": safe_avg([float(g.get("tov", 0) or 0) for g in logs]),
+        "mpg": safe_avg([parse_min(g.get("min")) for g in logs]),
+        "fg3_avg": safe_avg([float(g.get("fg3m", 0) or 0) for g in logs]),
+    }
+
+
+def get_player_stats(progress_callback=None) -> list:
+    """Retrieve all active player season stats from the DB."""
+    if progress_callback:
+        progress_callback(0, 1, "Loading player stats from DB…")
+    result = _etl.get_all_players()
+    if progress_callback:
+        progress_callback(1, 1, f"Loaded {len(result)} players.")
     return result
 
 
-def get_player_stats(progress_callback=None):
-    """Retrieve all active player season stats via nba_api."""
-    return _ldf_fetch_player_stats(progress_callback=progress_callback)
-
-
-def get_team_stats(progress_callback=None):
-    """Retrieve team-level stats via nba_api."""
-    return _ldf_fetch_team_stats(progress_callback=progress_callback)
-
-
-def get_defensive_ratings(force=False, progress_callback=None):
-    """Retrieve defensive ratings via nba_api."""
-    return _ldf_fetch_defensive_ratings(
-        force=force, progress_callback=progress_callback,
-    )
-
-
-def get_player_game_log(player_id, last_n_games=20):
-    """Retrieve a player's game log — BDL primary, nba_api fallback."""
-    if _BDL_AVAILABLE:
-        try:
-            result = _bdl_fetch_player_game_log(int(player_id), last_n=last_n_games)
-            if result:
-                return result
-        except Exception:
-            pass
-    result = _ldf_fetch_player_game_log(player_id, last_n_games=last_n_games)
-    if not result:
-        _logger.warning("get_player_game_log(%s): all sources returned no game log", player_id)
+def get_team_stats(progress_callback=None) -> list:
+    """Retrieve team-level stats from the DB."""
+    if progress_callback:
+        progress_callback(0, 1, "Loading team stats from DB…")
+    result = _etl.get_teams()
+    if progress_callback:
+        progress_callback(1, 1, f"Loaded {len(result)} teams.")
     return result
 
 
-def get_all_data(progress_callback=None, targeted=False, todays_games=None):
-    """Retrieve all NBA data (games, players, teams) via nba_api."""
-    return _ldf_fetch_all_data(
-        progress_callback=progress_callback,
-        targeted=targeted,
-        todays_games=todays_games,
-    )
+def get_defensive_ratings(force: bool = False, progress_callback=None) -> list:
+    """Retrieve all defensive-vs-position ratings from the DB."""
+    if progress_callback:
+        progress_callback(0, 1, "Loading defensive ratings from DB…")
+    result = _etl.get_all_defense_vs_position()
+    if progress_callback:
+        progress_callback(1, 1, f"Loaded {len(result)} defensive rating rows.")
+    return result
 
 
-def get_all_todays_data(progress_callback=None):
-    """One-click: retrieve games → players → props for tonight."""
-    return _ldf_fetch_all_todays_data(progress_callback=progress_callback)
+def get_player_game_log(player_id, last_n_games: int = 20) -> list:
+    """Retrieve a player's game log from the DB."""
+    result = _etl.get_player_game_logs(player_id, limit=last_n_games)
+    if not result:
+        _logger.debug("get_player_game_log(%s): DB returned no logs", player_id)
+    return result
 
 
-def get_active_rosters(team_abbrevs=None, progress_callback=None):
-    """Retrieve active rosters for specified teams via nba_api."""
-    return _ldf_fetch_active_rosters(
-        team_abbrevs=team_abbrevs,
-        progress_callback=progress_callback,
-    )
+def get_all_data(progress_callback=None, targeted: bool = False,
+                 todays_games=None) -> dict:
+    """Orchestrate: games + players + teams from the DB."""
+    result: dict[str, Any] = {"games": [], "players": [], "teams": []}
+    total = 3
+    step = 0
+
+    step += 1
+    if progress_callback:
+        progress_callback(step, total, "Loading games…")
+    result["games"] = todays_games if todays_games else get_todays_games()
+
+    step += 1
+    if progress_callback:
+        progress_callback(step, total, "Loading players…")
+    if result["games"]:
+        result["players"] = get_todays_players(result["games"])
+    else:
+        result["players"] = _etl.get_all_players()
+
+    step += 1
+    if progress_callback:
+        progress_callback(step, total, "Loading teams…")
+    result["teams"] = _etl.get_teams()
+
+    return result
 
 
-# ============================================================
-# Functions that exist only in the current codebase (no old
-# live_data_fetcher equivalent).  Kept with graceful fallbacks.
-# ============================================================
+def get_all_todays_data(progress_callback=None) -> dict:
+    """One-click: retrieve games + players from the DB for tonight."""
+    total = 2
+    if progress_callback:
+        progress_callback(0, total, "Loading today's games…")
+    games = get_todays_games()
+
+    if progress_callback:
+        progress_callback(1, total, "Loading today's players…")
+    players = get_todays_players(games) if games else []
+
+    if progress_callback:
+        progress_callback(2, total, f"Done: {len(games)} games, {len(players)} players.")
+    return {"games": games, "players": players}
+
+
+def get_active_rosters(team_abbrevs=None, progress_callback=None) -> dict:
+    """Retrieve active rosters for specified teams from the DB."""
+    if not team_abbrevs:
+        return {}
+    result: dict[str, list] = {}
+    # Build a team abbrev → team_id map from the DB
+    all_teams = _etl.get_teams()
+    abbrev_to_id = {
+        str(t.get("abbreviation", "")).upper(): t.get("team_id")
+        for t in all_teams
+    }
+    for abbrev in team_abbrevs:
+        abbrev_upper = abbrev.upper()
+        team_id = abbrev_to_id.get(abbrev_upper)
+        if team_id:
+            roster = _etl.get_team_roster(team_id)
+            result[abbrev_upper] = [
+                f"{r.get('first_name', '')} {r.get('last_name', '')}".strip()
+                for r in roster
+            ]
+        else:
+            result[abbrev_upper] = []
+    return result
+
 
 def get_standings(progress_callback=None) -> list:
-    """
-    Retrieve current NBA standings.
-
-    Tries BDL first, then nba_api LeagueStandingsV3 as fallback.
-    Returns an empty list on failure.
-    """
+    """Retrieve current NBA standings from the DB."""
     if progress_callback:
-        progress_callback(0, 10, "Retrieving NBA standings…")
-
-    # ── BDL primary ──────────────────────────────────────────
-    if _BDL_AVAILABLE:
-        try:
-            bdl_standings = _bdl_fetch_standings_list()
-            if bdl_standings:
-                standings = []
-                for row in bdl_standings:
-                    standings.append({
-                        "team_abbreviation": row.get("TeamAbbreviation", ""),
-                        "conference": row.get("Conference", ""),
-                        "conference_rank": int(row.get("PlayoffRank", 0)),
-                        "wins": int(row.get("WINS", 0)),
-                        "losses": int(row.get("LOSSES", 0)),
-                        "win_pct": float(row.get("WinPCT", 0.0)),
-                        "streak": str(row.get("strCurrentStreak", "")),
-                        "last_10": "",
-                    })
-                if progress_callback:
-                    progress_callback(10, 10, f"Standings loaded ({len(standings)} teams).")
-                return standings
-        except Exception as exc:
-            _logger.debug("get_standings: BDL failed (%s), falling back to nba_api", exc)
-
-    # ── nba_api fallback ─────────────────────────────────────
-    try:
-        from nba_api.stats.endpoints import leaguestandingsv3
-        import time
-        time.sleep(API_DELAY_SECONDS)
-        raw = leaguestandingsv3.LeagueStandingsV3(season=_current_season())
-        df = raw.get_data_frames()[0]
-        standings = []
-        for _, row in df.iterrows():
-            abbr = TEAM_NAME_TO_ABBREVIATION.get(
-                f"{row.get('TeamCity', '')} {row.get('TeamName', '')}".strip(),
-                row.get("TeamAbbreviation", ""),
-            )
-            standings.append({
-                "team_abbreviation": abbr,
-                "conference": row.get("Conference", ""),
-                "conference_rank": int(row.get("PlayoffRank", 0)),
-                "wins": int(row.get("WINS", 0)),
-                "losses": int(row.get("LOSSES", 0)),
-                "win_pct": float(row.get("WinPCT", 0.0)),
-                "streak": str(row.get("strCurrentStreak", "")),
-                "last_10": str(row.get("L10", "")),
-            })
-        if progress_callback:
-            progress_callback(10, 10, f"Standings loaded ({len(standings)} teams).")
-        return standings
-    except Exception as exc:
-        _logger.warning("get_standings failed: %s", exc)
-    return []
-
-
-def get_player_news(player_name=None, limit=20) -> list:
-    """
-    Retrieve recent NBA news.
-    Returns an empty list if all sources fail.
-    """
-    return []
-
-
-# ============================================================
-# nba_live_fetcher.py wrappers — new NBA API Gateway
-# These functions delegate to data/nba_live_fetcher.py, which
-# wraps the full breadth of stats.nba.com endpoints.
-# ============================================================
-
-try:
-    from data.nba_live_fetcher import (
-        fetch_player_game_logs as _nlf_fetch_player_game_logs,
-        fetch_box_score_traditional as _nlf_fetch_box_score_traditional,
-        fetch_box_score_advanced as _nlf_fetch_box_score_advanced,
-        fetch_box_score_usage as _nlf_fetch_box_score_usage,
-        fetch_player_on_off as _nlf_fetch_player_on_off,
-        fetch_player_estimated_metrics as _nlf_fetch_player_estimated_metrics,
-        fetch_player_fantasy_profile as _nlf_fetch_player_fantasy_profile,
-        fetch_rotations as _nlf_fetch_rotations,
-        fetch_schedule as _nlf_fetch_schedule,
-        fetch_todays_scoreboard as _nlf_fetch_todays_scoreboard,
-        fetch_box_score_matchups as _nlf_fetch_box_score_matchups,
-        fetch_hustle_box_score as _nlf_fetch_hustle_box_score,
-        fetch_defensive_box_score as _nlf_fetch_defensive_box_score,
-        fetch_scoring_box_score as _nlf_fetch_scoring_box_score,
-        fetch_tracking_box_score as _nlf_fetch_tracking_box_score,
-        fetch_four_factors_box_score as _nlf_fetch_four_factors_box_score,
-        fetch_player_shooting_splits as _nlf_fetch_player_shooting_splits,
-        fetch_shot_chart as _nlf_fetch_shot_chart,
-        fetch_player_clutch_stats as _nlf_fetch_player_clutch_stats,
-        fetch_team_lineups as _nlf_fetch_team_lineups,
-        fetch_team_dashboard as _nlf_fetch_team_dashboard,
-        fetch_standings as _nlf_fetch_standings,
-        fetch_team_game_logs as _nlf_fetch_team_game_logs,
-        fetch_player_year_over_year as _nlf_fetch_player_year_over_year,
-        fetch_player_vs_player as _nlf_fetch_player_vs_player,
-        fetch_win_probability as _nlf_fetch_win_probability,
-        fetch_play_by_play as _nlf_fetch_play_by_play,
-        fetch_game_summary as _nlf_fetch_game_summary,
-        fetch_league_leaders as _nlf_fetch_league_leaders,
-        fetch_team_streak_finder as _nlf_fetch_team_streak_finder,
-    )
-    _NLF_AVAILABLE = True
-except Exception as _nlf_import_err:
-    _logger.debug("nba_live_fetcher not available: %s", _nlf_import_err)
-    _NLF_AVAILABLE = False
-
-
-def _nlf_unavailable_list(*_args, **_kwargs):
-    return []
-
-
-def _nlf_unavailable_dict(*_args, **_kwargs):
-    return {}
-
-
-# ── TIER 1: Critical endpoints ───────────────────────────────────────────────
-
-def get_player_game_logs_v2(player_id: int, season: str | None = None, last_n: int = 0) -> list:
-    """Return per-game stats from nba_live_fetcher (supports last_n filter)."""
-    if not _NLF_AVAILABLE:
-        return []
-    return _nlf_fetch_player_game_logs(player_id, season=season, last_n=last_n)
-
-
-def get_box_score_traditional(game_id: str, period: int = 0) -> dict:
-    """Return the traditional box score for a game."""
-    if not _NLF_AVAILABLE:
-        return {}
-    return _nlf_fetch_box_score_traditional(game_id, period=period)
-
-
-def get_box_score_advanced(game_id: str) -> dict:
-    """Return the advanced box score for a game."""
-    if not _NLF_AVAILABLE:
-        return {}
-    return _nlf_fetch_box_score_advanced(game_id)
-
-
-def get_box_score_usage(game_id: str) -> dict:
-    """Return usage statistics box score for a game (USG_PCT, touches, etc.)."""
-    if not _NLF_AVAILABLE:
-        return {}
-    return _nlf_fetch_box_score_usage(game_id)
-
-
-def get_player_on_off(team_id: int, season: str | None = None) -> dict:
-    """Return On/Off court differential stats for all players on a team."""
-    if not _NLF_AVAILABLE:
-        return {}
-    return _nlf_fetch_player_on_off(team_id, season=season)
-
-
-def get_player_estimated_metrics(season: str | None = None) -> list:
-    """Return estimated advanced metrics for all players (pace, ortg, drtg, etc.)."""
-    if not _NLF_AVAILABLE:
-        return []
-    return _nlf_fetch_player_estimated_metrics(season=season)
-
-
-def get_player_fantasy_profile(player_id: int, season: str | None = None) -> dict:
-    """Return fantasy-relevant stat splits for a player (last 5/10/15/20 games)."""
-    if not _NLF_AVAILABLE:
-        return {}
-    return _nlf_fetch_player_fantasy_profile(player_id, season=season)
-
-
-def get_rotations(game_id: str) -> dict:
-    """Return in/out rotation data (exact stint times) for a game."""
-    if not _NLF_AVAILABLE:
-        return {}
-    return _nlf_fetch_rotations(game_id)
-
-
-def get_schedule(game_date: str | None = None) -> list:
-    """Return the game schedule for a given date (defaults to today)."""
-    if not _NLF_AVAILABLE:
-        return []
-    return _nlf_fetch_schedule(game_date=game_date)
-
-
-def get_todays_scoreboard() -> dict:
-    """Return today's full scoreboard (game headers, line scores, standings)."""
-    if not _NLF_AVAILABLE:
-        return {}
-    return _nlf_fetch_todays_scoreboard()
-
-
-# ── TIER 2: High-value endpoints ─────────────────────────────────────────────
-
-def get_box_score_matchups(game_id: str) -> dict:
-    """Return defensive matchup data for a game (who guarded whom)."""
-    if not _NLF_AVAILABLE:
-        return {}
-    return _nlf_fetch_box_score_matchups(game_id)
-
-
-def get_hustle_box_score(game_id: str) -> dict:
-    """Return hustle stats box score (charges, deflections, loose balls)."""
-    if not _NLF_AVAILABLE:
-        return {}
-    return _nlf_fetch_hustle_box_score(game_id)
-
-
-def get_defensive_box_score(game_id: str) -> dict:
-    """Return defensive statistics box score for a game."""
-    if not _NLF_AVAILABLE:
-        return {}
-    return _nlf_fetch_defensive_box_score(game_id)
-
-
-def get_scoring_box_score(game_id: str) -> dict:
-    """Return scoring breakdown box score (FG% by zone, etc.)."""
-    if not _NLF_AVAILABLE:
-        return {}
-    return _nlf_fetch_scoring_box_score(game_id)
-
-
-def get_tracking_box_score(game_id: str) -> dict:
-    """Return player-tracking box score (speed, distance, touches)."""
-    if not _NLF_AVAILABLE:
-        return {}
-    return _nlf_fetch_tracking_box_score(game_id)
-
-
-def get_four_factors_box_score(game_id: str) -> dict:
-    """Return four-factors box score (eFG%, TO%, ORB%, FT rate)."""
-    if not _NLF_AVAILABLE:
-        return {}
-    return _nlf_fetch_four_factors_box_score(game_id)
-
-
-def get_player_shooting_splits(player_id: int, season: str | None = None) -> dict:
-    """Return detailed shooting splits for a player (by zone, distance, etc.)."""
-    if not _NLF_AVAILABLE:
-        return {}
-    return _nlf_fetch_player_shooting_splits(player_id, season=season)
-
-
-def get_shot_chart_v2(player_id: int, season: str | None = None) -> list:
-    """Return shot chart data for a player (x/y coords, made/missed, zone)."""
-    if not _NLF_AVAILABLE:
-        return []
-    return _nlf_fetch_shot_chart(player_id, season=season)
-
-
-def get_player_clutch_stats(season: str | None = None) -> list:
-    """Return clutch-time stats (last 5 min, margin ≤5) for all players."""
-    if not _NLF_AVAILABLE:
-        return []
-    return _nlf_fetch_player_clutch_stats(season=season)
-
-
-def get_team_lineups(team_id: int, season: str | None = None) -> list:
-    """Return 5-man lineup stats for a specific team."""
-    if not _NLF_AVAILABLE:
-        return []
-    return _nlf_fetch_team_lineups(team_id, season=season)
-
-
-def get_team_dashboard(team_id: int, season: str | None = None) -> dict:
-    """Return team dashboard stats (home/away splits, days rest, monthly)."""
-    if not _NLF_AVAILABLE:
-        return {}
-    return _nlf_fetch_team_dashboard(team_id, season=season)
-
-
-def get_team_game_logs(team_id: int, season: str | None = None, last_n: int = 0) -> list:
-    """Return per-game stats for a team, optionally capped to last_n games."""
-    if not _NLF_AVAILABLE:
-        return []
-    return _nlf_fetch_team_game_logs(team_id, season=season, last_n=last_n)
-
-
-def get_player_year_over_year(player_id: int) -> list:
-    """Return year-over-year career stats for a player."""
-    if not _NLF_AVAILABLE:
-        return []
-    return _nlf_fetch_player_year_over_year(player_id)
-
-
-# ── TIER 3: Reference & context endpoints ────────────────────────────────────
-
-def get_player_vs_player(
-    player1_id: int,
-    player2_id: int,
-    season: str | None = None,
-) -> dict:
-    """Return head-to-head stats for player1 when matched against player2."""
-    if not _NLF_AVAILABLE:
-        return {}
-    return _nlf_fetch_player_vs_player(player1_id, player2_id, season=season)
-
-
-def get_win_probability(game_id: str) -> dict:
-    """Return real-time win probability at each point in the game."""
-    if not _NLF_AVAILABLE:
-        return {}
-    return _nlf_fetch_win_probability(game_id)
-
-
-def get_play_by_play_v2(game_id: str) -> list:
-    """Return play-by-play events for a game."""
-    if not _NLF_AVAILABLE:
-        return []
-    return _nlf_fetch_play_by_play(game_id)
-
-
-def get_game_summary(game_id: str) -> dict:
-    """Return high-level game summary (arena, officials, attendance, etc.)."""
-    if not _NLF_AVAILABLE:
-        return {}
-    return _nlf_fetch_game_summary(game_id)
-
-
-def get_league_leaders(stat_category: str = "PTS", season: str | None = None) -> list:
-    """Return top players for a given statistical category — BDL primary."""
-    if _BDL_AVAILABLE:
-        try:
-            bdl_stat = _NBA_API_TO_BDL_STAT_MAP.get(stat_category, stat_category.lower())
-            result = _bdl_fetch_league_leaders(stat_type=bdl_stat)
-            if result:
-                return result
-        except Exception:
-            pass
-    if not _NLF_AVAILABLE:
-        return []
-    return _nlf_fetch_league_leaders(stat_category=stat_category, season=season)
-
-
-def get_team_streak_finder(team_id: int, season: str | None = None) -> list:
-    """Return full season game log for a team (for streak/form computation)."""
-    if not _NLF_AVAILABLE:
-        return []
-    return _nlf_fetch_team_streak_finder(team_id, season=season)
-
-
-# ── End nba_live_fetcher.py wrappers ─────────────────────────────────────────
+        progress_callback(0, 1, "Loading standings from DB…")
+    result = _etl.get_standings()
+    if progress_callback:
+        progress_callback(1, 1, f"Standings loaded ({len(result)} rows).")
+    return result
 
 
 def get_standings_from_nba_api(season: str | None = None) -> list:
-    """
-    Retrieve NBA standings — BDL primary, nba_stats_service fallback.
+    """Retrieve NBA standings (same DB source as get_standings)."""
+    return _etl.get_standings()
 
-    Parameters
-    ----------
-    season : str | None
-        Season string (e.g. "2024-25").  Defaults to current season.
 
-    Returns
-    -------
-    list[dict]
-        Standings rows with keys: team_abbreviation, team_name,
-        conference, conference_rank, wins, losses, win_pct, streak,
-        last_10.
-    """
-    if _BDL_AVAILABLE:
-        try:
-            result = _bdl_fetch_standings_list()
-            if result:
-                return result
-        except Exception:
-            pass
-    try:
-        from data.nba_stats_service import get_league_standings
-        return get_league_standings(season=season)
-    except Exception as exc:
-        _logger.warning("get_standings_from_nba_api failed: %s", exc)
+def get_league_leaders(stat_category: str = "PTS",
+                       season: str | None = None) -> list:
+    """Return league leaders from the DB."""
+    return _etl.get_league_leaders()
+
+
+# ============================================================
+# TIER 1: Game-level wrappers
+# ============================================================
+
+def get_player_game_logs_v2(player_id: int, season: str | None = None,
+                            last_n: int = 0) -> list:
+    """Return per-game stats from the DB."""
+    limit = last_n if last_n > 0 else None
+    return _etl.get_player_game_logs(player_id, limit=limit)
+
+
+def get_box_score_traditional(game_id: str, period: int = 0) -> dict:
+    """Return traditional box score from the DB (via advanced box score)."""
+    result = _etl.get_box_score_advanced(game_id)
+    return {"players": result} if result else {}
+
+
+def get_box_score_advanced(game_id: str) -> dict:
+    """Return advanced box score for a game from the DB."""
+    result = _etl.get_box_score_advanced(game_id)
+    return {"players": result} if result else {}
+
+
+def get_box_score_usage(game_id: str) -> dict:
+    """Usage box score — not available from DB."""
+    return {}
+
+
+def get_player_on_off(team_id: int, season: str | None = None) -> dict:
+    """On/Off court stats — not available from DB."""
+    return {}
+
+
+def get_player_estimated_metrics(season: str | None = None) -> list:
+    """Estimated advanced metrics — not available from DB."""
     return []
 
 
-def get_game_logs_from_nba_api(
-    player_name: str,
-    season: str | None = None,
-) -> list:
-    """
-    Resolve *player_name* to a player ID and fetch game logs via
-    nba_stats_service.
+def get_player_fantasy_profile(player_id: int,
+                               season: str | None = None) -> dict:
+    """Fantasy stat splits — not available from DB."""
+    return {}
 
-    Parameters
-    ----------
-    player_name : str
-        Full player name (case-insensitive).
-    season : str | None
-        Season string (e.g. "2024-25").  Defaults to current season.
 
-    Returns
-    -------
-    list[dict]
-        Per-game stat dicts with nba_api column names (PTS, REB, …).
-        Returns [] if the player cannot be found or the call fails.
-    """
+def get_rotations(game_id: str) -> dict:
+    """Rotation data — not available from DB."""
+    return {}
+
+
+def get_schedule(game_date: str | None = None) -> list:
+    """Return the game schedule from the DB."""
+    return _etl.get_schedule()
+
+
+def get_todays_scoreboard() -> dict:
+    """Build a scoreboard dict from today's games."""
+    games = get_todays_games()
+    return {"games": games, "game_count": len(games)}
+
+
+# ============================================================
+# TIER 2: High-value wrappers
+# ============================================================
+
+def get_box_score_matchups(game_id: str) -> dict:
+    return {}
+
+
+def get_hustle_box_score(game_id: str) -> dict:
+    return {}
+
+
+def get_defensive_box_score(game_id: str) -> dict:
+    return {}
+
+
+def get_scoring_box_score(game_id: str) -> dict:
+    return {}
+
+
+def get_tracking_box_score(game_id: str) -> dict:
+    return {}
+
+
+def get_four_factors_box_score(game_id: str) -> dict:
+    return {}
+
+
+def get_player_shooting_splits(player_id: int,
+                               season: str | None = None) -> dict:
+    return {}
+
+
+def get_shot_chart_v2(player_id: int, season: str | None = None) -> list:
+    return []
+
+
+def get_player_clutch_stats(season: str | None = None) -> list:
+    return []
+
+
+def get_team_lineups(team_id: int, season: str | None = None) -> list:
+    return []
+
+
+def get_team_dashboard(team_id: int, season: str | None = None) -> dict:
+    return {}
+
+
+def get_team_game_logs(team_id: int, season: str | None = None,
+                       last_n: int = 0) -> list:
+    return []
+
+
+def get_player_year_over_year(player_id: int) -> list:
+    """Return year-over-year career stats from the DB."""
+    result = _etl.get_player_career(player_id)
+    return result if result else []
+
+
+# ============================================================
+# TIER 3: Reference & context
+# ============================================================
+
+def get_player_vs_player(player1_id: int, player2_id: int,
+                         season: str | None = None) -> dict:
+    return {}
+
+
+def get_win_probability(game_id: str) -> dict:
+    return {}
+
+
+def get_play_by_play_v2(game_id: str) -> list:
+    return []
+
+
+def get_game_summary(game_id: str) -> dict:
+    return {}
+
+
+def get_team_streak_finder(team_id: int,
+                           season: str | None = None) -> list:
+    return []
+
+
+# ============================================================
+# Utility functions
+# ============================================================
+
+def get_player_news(player_name: str | None = None, limit: int = 20) -> list:
+    """Player news — not available from DB."""
+    return []
+
+
+def get_game_logs_from_nba_api(player_name: str,
+                               season: str | None = None) -> list:
+    """Resolve player_name via the DB and fetch game logs."""
     try:
-        from data.player_profile_service import get_player_id
-        from data.nba_stats_service import get_player_game_logs
-
-        player_id = get_player_id(player_name)
-        if not player_id:
-            _logger.debug("get_game_logs_from_nba_api: no player ID for %r", player_name)
+        player = _etl.get_player_by_name(player_name)
+        if not player or not player.get("player_id"):
+            _logger.debug("get_game_logs_from_nba_api: no player for %r", player_name)
             return []
-
-        return get_player_game_logs(player_id, season=season)
+        return _etl.get_player_game_logs(player["player_id"])
     except Exception as exc:
         _logger.warning("get_game_logs_from_nba_api(%r) failed: %s", player_name, exc)
     return []
 
 
 def refresh_historical_data_for_tonight(
-    games=None,
-    last_n_games=30,
-    progress_callback=None,
+    games=None, last_n_games: int = 30, progress_callback=None,
 ) -> dict:
-    """
-    Auto-retrieve historical game logs for tonight's players and
-    update CLV closing lines.
-
-    Uses nba_api for player game logs.  Stores results in the game
-    log cache for the Backtester page.
-    """
-    results = {"players_refreshed": 0, "clv_updated": 0, "errors": 0}
-
-    if games is None:
-        try:
-            import streamlit as _st
-            games = _st.session_state.get("todays_games", [])
-        except Exception:
-            games = []
-
-    if not games:
-        _logger.debug("refresh_historical_data_for_tonight: no games — skipping")
-        return results
-
-    playing_teams = set()
-    for g in games:
-        for key in ("home_team", "away_team"):
-            t = str(g.get(key, "")).upper().strip()
-            if t:
-                playing_teams.add(t)
-
-    if not playing_teams:
-        return results
-
-    try:
-        from data.data_manager import load_players_data as _load_players
-        all_players = _load_players()
-    except Exception as exc:
-        _logger.warning("refresh_historical_data_for_tonight: could not load players — %s", exc)
-        return results
-
-    tonight_players = [
-        p for p in all_players
-        if str(p.get("team", "")).upper().strip() in playing_teams
-        and p.get("player_id")
-    ]
-
-    if not tonight_players:
-        _logger.debug("refresh_historical_data_for_tonight: no players with IDs found")
-        return results
-
-    total = len(tonight_players)
-    if progress_callback:
-        progress_callback(0, total, f"Retrieving historical logs for {total} player(s)…")
-
-    for idx, p in enumerate(tonight_players):
-        player_id = p.get("player_id")
-        player_name = p.get("name", f"ID-{player_id}")
-        try:
-            logs = _ldf_fetch_player_game_log(player_id, last_n_games=last_n_games)
-            if logs:
-                try:
-                    from data.game_log_cache import save_game_logs_to_cache as _save_cache
-                    _save_cache(player_name, logs)
-                    results["players_refreshed"] += 1
-                except Exception:
-                    results["errors"] += 1
-        except Exception:
-            results["errors"] += 1
-        if progress_callback:
-            progress_callback(idx + 1, total, f"Cached logs for {player_name}")
-
-    # Auto-update CLV closing lines
-    try:
-        from engine.clv_tracker import auto_update_closing_lines as _clv_update
-        clv_result = _clv_update(days_back=1)
-        results["clv_updated"] = clv_result.get("updated", 0)
-    except Exception as exc:
-        _logger.debug("refresh_historical_data_for_tonight: CLV update skipped — %s", exc)
-
-    _logger.info(
-        "refresh_historical_data_for_tonight: players_refreshed=%d, clv_updated=%d, errors=%d",
-        results["players_refreshed"], results["clv_updated"], results["errors"],
-    )
-    return results
-
-
-# ============================================================
-# NBADataService — class-based API wrapper
-# ============================================================
-
-class NBADataService:
-    """
-    Class-based service for NBA data operations.
-
-    Wraps the existing module-level functions in an OOP interface,
-    providing cache management and bulk-refresh convenience methods.
-    All callers can continue using the module-level functions directly;
-    this class is offered for callers that prefer dependency injection.
-    """
-
-    def __init__(self):
-        if _HAS_FILE_CACHE:
-            self.cache = _FileCache(cache_dir="cache/service", ttl_hours=1)
-        else:
-            self.cache = None
-
-        try:
-            from data.roster_engine import RosterEngine
-            self.roster_engine = RosterEngine()
-        except Exception:
-            self.roster_engine = None
-
-    # ── Core data methods ─────────────────────────────────────
-
-    def get_todays_games(self):
-        """Get today's NBA games."""
-        return get_todays_games()
-
-    def get_todays_players(self, games, progress_callback=None,
-                           precomputed_injury_map=None):
-        """Get players for teams playing today."""
-        return get_todays_players(
-            games,
-            progress_callback=progress_callback,
-            precomputed_injury_map=precomputed_injury_map,
-        )
-
-    def get_team_stats(self, progress_callback=None):
-        """Get team statistics."""
-        return get_team_stats(progress_callback=progress_callback)
-
-    def get_injuries(self):
-        """Get current injury data via RosterEngine."""
-        if self.roster_engine:
-            return self.roster_engine.refresh()
-        return {}
-
-    # ── Cache & refresh ───────────────────────────────────────
-
-    def clear_caches(self):
-        """Clear all caches (delegates to module-level clear_caches)."""
-        clear_caches()
-
-    def refresh_all_data(self, progress_callback=None):
-        """Refresh all data (delegates to module-level refresh_all_data)."""
-        return refresh_all_data(progress_callback=progress_callback)
-
-
-# ============================================================
-# Utility-layer integration — cache management & bulk refresh
-# ============================================================
-
-def clear_caches() -> None:
-    """
-    Clear file-based and in-memory caches across the data layer.
-
-    Clears caches in live_data_fetcher, roster_engine, and the
-    in-memory tiered cache used by utils.cache.  Safe to call even
-    if some modules are unavailable (graceful no-ops).
-    """
-    cleared = []
-
-    # 1. In-memory tiered cache (utils.cache.cache_clear)
-    try:
-        from utils.cache import cache_clear
-        cache_clear()
-        cleared.append("in-memory")
-    except Exception:
-        pass
-
-    # 2. File-based cache directories
-    if _HAS_FILE_CACHE:
-        for cache_dir in ("cache/service", "cache/props", "cache/rosters"):
-            try:
-                fc = _FileCache(cache_dir=cache_dir, ttl_hours=0)
-                fc.clear()
-                cleared.append(cache_dir)
-            except Exception:
-                pass
-
-    _logger.info("clear_caches: cleared %s", ", ".join(cleared) if cleared else "(none)")
+    """No-op — historical data is pre-populated in the DB."""
+    return {"players_refreshed": 0, "clv_updated": 0, "errors": 0}
 
 
 def refresh_all_data(progress_callback=None) -> dict:
-    """
-    Refresh all core data sources with per-source error isolation.
-
-    Fetches games, players, team stats, and injury data.  Each source
-    is wrapped in its own try/except so a single failure does not
-    block the others.
-
-    Parameters
-    ----------
-    progress_callback : callable or None
-        Called as ``progress_callback(current, total, message)`` to
-        report incremental progress (e.g. to a Streamlit progress bar).
-
-    Returns
-    -------
-    dict
-        Keys: ``games``, ``players``, ``team_stats``, ``injuries``,
-        ``errors`` (list of error strings for any source that failed).
-    """
-    result = {
+    """Refresh all core data sources from the DB."""
+    result: dict[str, Any] = {
         "games": [],
         "players": [],
         "team_stats": None,
@@ -869,7 +696,6 @@ def refresh_all_data(progress_callback=None) -> dict:
     total_steps = 4
     step = 0
 
-    # ── Games ──────────────────────────────────────────────────
     step += 1
     if progress_callback:
         progress_callback(step, total_steps, "Fetching today's games…")
@@ -879,7 +705,6 @@ def refresh_all_data(progress_callback=None) -> dict:
         _logger.error("refresh_all_data — games failed: %s", exc)
         result["errors"].append(f"Games: {exc}")
 
-    # ── Players (only if games available) ──────────────────────
     step += 1
     if progress_callback:
         progress_callback(step, total_steps, "Fetching players…")
@@ -890,24 +715,20 @@ def refresh_all_data(progress_callback=None) -> dict:
             _logger.error("refresh_all_data — players failed: %s", exc)
             result["errors"].append(f"Players: {exc}")
 
-    # ── Team stats ─────────────────────────────────────────────
     step += 1
     if progress_callback:
         progress_callback(step, total_steps, "Fetching team stats…")
     try:
-        result["team_stats"] = get_team_stats()
+        result["team_stats"] = _etl.get_teams()
     except Exception as exc:
         _logger.error("refresh_all_data — team stats failed: %s", exc)
         result["errors"].append(f"Team stats: {exc}")
 
-    # ── Injuries ───────────────────────────────────────────────
     step += 1
     if progress_callback:
         progress_callback(step, total_steps, "Fetching injury data…")
     try:
-        from data.roster_engine import RosterEngine as _RE
-        _re = _RE()
-        result["injuries"] = _re.refresh()
+        result["injuries"] = _etl.get_injuries()
     except Exception as exc:
         _logger.error("refresh_all_data — injuries failed: %s", exc)
         result["errors"].append(f"Injuries: {exc}")
@@ -921,34 +742,81 @@ def refresh_all_data(progress_callback=None) -> dict:
     return result
 
 
-# ============================================================
-# ETL refresh helpers — thin wrappers around live_data_fetcher
-# ============================================================
-
 def refresh_from_etl(progress_callback=None) -> dict:
+    """Incremental ETL update via etl_data_service."""
+    return _etl.refresh_data()
+
+
+def full_refresh_from_etl(season: str | None = None,
+                          progress_callback=None) -> dict:
+    """Full ETL pull via etl_data_service."""
+    return _etl.refresh_data()
+
+
+def clear_caches() -> None:
+    """Clear caches — no-op in DB-only mode."""
+    _logger.info("clear_caches: no external caches to clear in DB-only mode")
+    try:
+        from utils.cache import cache_clear
+        cache_clear()
+    except Exception:
+        pass
+
+
+def get_cached_roster(team_abbrev: str) -> list:
+    """Return the active roster for a team from the DB."""
+    all_teams = _etl.get_teams()
+    abbrev_to_id = {
+        str(t.get("abbreviation", "")).upper(): t.get("team_id")
+        for t in all_teams
+    }
+    team_id = abbrev_to_id.get(team_abbrev.upper())
+    if not team_id:
+        return []
+    roster = _etl.get_team_roster(team_id)
+    return [
+        f"{r.get('first_name', '')} {r.get('last_name', '')}".strip()
+        for r in roster
+    ]
+
+
+# ============================================================
+# NBADataService — class-based API wrapper
+# ============================================================
+
+class NBADataService:
     """
-    Incremental ETL update — fetch only new game logs since the last
-    stored date in db/etl_data.db.
+    Class-based service for NBA data operations.
 
-    Args:
-        progress_callback (callable | None): (current, total, message).
-
-    Returns:
-        dict: {new_games, new_logs, new_players, error (optional)}
+    Wraps the existing module-level functions in an OOP interface.
+    All data comes from the SmartPicksProAI database.
     """
-    return _ldf_refresh_from_etl(progress_callback=progress_callback)
 
+    def __init__(self):
+        if _HAS_FILE_CACHE:
+            self.cache = _FileCache(cache_dir="cache/service", ttl_hours=1)
+        else:
+            self.cache = None
 
-def full_refresh_from_etl(season: str | None = None, progress_callback=None) -> dict:
-    """
-    Full ETL pull — re-fetches the entire season from nba_api and
-    repopulates db/etl_data.db.
+    def get_todays_games(self):
+        return get_todays_games()
 
-    Args:
-        season (str | None): Season string, e.g. '2025-26'.
-        progress_callback (callable | None): (current, total, message).
+    def get_todays_players(self, games, progress_callback=None,
+                           precomputed_injury_map=None):
+        return get_todays_players(
+            games,
+            progress_callback=progress_callback,
+            precomputed_injury_map=precomputed_injury_map,
+        )
 
-    Returns:
-        dict: {players_inserted, games_inserted, logs_inserted, error (optional)}
-    """
-    return _ldf_full_refresh_from_etl(season=season, progress_callback=progress_callback)
+    def get_team_stats(self, progress_callback=None):
+        return get_team_stats(progress_callback=progress_callback)
+
+    def get_injuries(self):
+        return _etl.get_injuries()
+
+    def clear_caches(self):
+        clear_caches()
+
+    def refresh_all_data(self, progress_callback=None):
+        return refresh_all_data(progress_callback=progress_callback)
